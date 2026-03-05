@@ -24,6 +24,9 @@ export default function Dashboard({ jobs }: { jobs: Job[] }) {
             <p className="mt-2 text-sm text-slate-500">
               Min experience: {job.min_experience_years ?? "Not specified"} years
             </p>
+            <p className="mt-1 text-sm text-slate-500">
+              Location: {job.location ?? "Not specified"}
+            </p>
           </Link>
         ))}
       </section>

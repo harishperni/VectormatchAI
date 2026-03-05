@@ -1,4 +1,23 @@
+"use client";
+
+import { useState } from "react";
+
 import { type ParsedResumeRow } from "@/lib/api";
+
+type Props = {
+  jobId: string;
+  rows: ParsedResumeRow[];
+};
+
+type ResumeDetail = {
+  resume_id: string;
+  candidate_name: string;
+  parse_status: string;
+  parse_error: string | null;
+  source_filename: string | null;
+  parsed_json: Record<string, unknown>;
+  raw_text: string;
+};
 
 function statusClass(status: ParsedResumeRow["parse_status"]): string {
   if (status === "parsed") return "bg-emerald-50 text-emerald-700 border-emerald-200";
@@ -6,7 +25,32 @@ function statusClass(status: ParsedResumeRow["parse_status"]): string {
   return "bg-amber-50 text-amber-700 border-amber-200";
 }
 
-export default function ParsedResumesTable({ rows }: { rows: ParsedResumeRow[] }) {
+export default function ParsedResumesTable({ jobId, rows }: Props) {
+  const [selected, setSelected] = useState<ResumeDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openParsedResume(resumeId: string) {
+    setLoading(true);
+    setError(null);
+    setSelected(null);
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/resumes/${resumeId}`, {
+        cache: "no-store",
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        setError(payload?.detail ?? "Could not load parsed resume details.");
+      } else {
+        setSelected(payload as ResumeDetail);
+      }
+    } catch {
+      setError("Could not load parsed resume details.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="mb-3 flex items-center justify-between">
@@ -33,7 +77,8 @@ export default function ParsedResumesTable({ rows }: { rows: ParsedResumeRow[] }
                 <th className="py-2 pr-3">Status</th>
                 <th className="py-2 pr-3">Experience</th>
                 <th className="py-2 pr-3">Skills</th>
-                <th className="py-2">Parse Error</th>
+                <th className="py-2 pr-3">Parse Error</th>
+                <th className="py-2">Parsed View</th>
               </tr>
             </thead>
             <tbody>
@@ -43,7 +88,9 @@ export default function ParsedResumesTable({ rows }: { rows: ParsedResumeRow[] }
                   <td className="py-2 pr-3 text-slate-700">{row.email ?? "-"}</td>
                   <td className="py-2 pr-3 text-slate-700">{row.source_filename ?? "-"}</td>
                   <td className="py-2 pr-3">
-                    <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${statusClass(row.parse_status)}`}>
+                    <span
+                      className={`rounded-full border px-2 py-1 text-xs font-semibold ${statusClass(row.parse_status)}`}
+                    >
                       {row.parse_status}
                     </span>
                   </td>
@@ -53,11 +100,55 @@ export default function ParsedResumesTable({ rows }: { rows: ParsedResumeRow[] }
                   <td className="py-2 pr-3 text-slate-700">
                     {row.skills.length > 0 ? row.skills.slice(0, 6).join(", ") : "-"}
                   </td>
-                  <td className="py-2 text-rose-700">{row.parse_error ?? "-"}</td>
+                  <td className="py-2 pr-3 text-rose-700">{row.parse_error ?? "-"}</td>
+                  <td className="py-2">
+                    <button
+                      onClick={() => openParsedResume(row.resume_id)}
+                      className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700"
+                    >
+                      View Parsed
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      ) : null}
+
+      {loading ? <p className="mt-3 text-sm text-slate-600">Loading parsed resume...</p> : null}
+      {error ? (
+        <p className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">{error}</p>
+      ) : null}
+
+      {selected ? (
+        <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="font-semibold text-slate-900">Parsed Resume Debug View</p>
+            <button
+              onClick={() => setSelected(null)}
+              className="rounded border border-slate-300 px-2 py-1 text-xs"
+            >
+              Close
+            </button>
+          </div>
+          <p className="text-xs text-slate-500">{selected.source_filename ?? selected.resume_id}</p>
+
+          <div className="mt-3 grid gap-3 lg:grid-cols-2">
+            <article className="rounded border border-slate-200 bg-white p-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Extracted JSON</p>
+              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-800">
+                {JSON.stringify(selected.parsed_json, null, 2)}
+              </pre>
+            </article>
+
+            <article className="rounded border border-slate-200 bg-white p-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Raw Resume Text</p>
+              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-800">
+                {selected.raw_text || "No raw text extracted."}
+              </pre>
+            </article>
+          </div>
         </div>
       ) : null}
     </section>

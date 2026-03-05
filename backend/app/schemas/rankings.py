@@ -12,7 +12,7 @@ class RankingRow(BaseModel):
     current_last_job: str | None = None
     score: float
     confidence: float
-    experience_years: float
+    experience_years: float | None = None
     highest_degree: str | None = None
     distance_miles: float | None = None
     sponsorship_required: bool | None = None

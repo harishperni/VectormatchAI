@@ -133,7 +133,7 @@ export default async function JobRankingPage({
         <div className="space-y-4">
           <ResumeUploadPanel jobId={jobId} />
           <CandidateReviewWorkspace jobId={jobId} rows={rankings} resumes={resumes} />
-          <ParsedResumesTable rows={resumes} />
+          <ParsedResumesTable jobId={jobId} rows={resumes} />
         </div>
       </section>
     </main>

@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AuditLog, Candidate, JobResume, Resume
 from app.db.session import get_db
-from app.schemas.jobs import JobCreate, JobOut
+from app.schemas.jobs import JobCreate, JobOut, JobUpdate
 from app.services.ingestion_service import create_resume_entry, save_resume_file
-from app.services.jobs_service import create_job, get_job, list_jobs
+from app.services.jobs_service import create_job, get_job, list_jobs, update_job
 from app.services.queue_service import enqueue_resume_ingestion
 
 router = APIRouter()
@@ -36,6 +36,19 @@ def get_job_handler(job_id: str, db: Session = Depends(get_db)) -> JobOut:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.patch("/{job_id}", response_model=JobOut)
+def update_job_handler(job_id: str, payload: JobUpdate, db: Session = Depends(get_db)) -> JobOut:
+    try:
+        parsed_id = uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid job_id format") from exc
+
+    job = get_job(db, parsed_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return update_job(db, job, payload)
 
 
 @router.post("/{job_id}/resumes/upload")
@@ -183,8 +196,47 @@ def job_resumes_handler(job_id: str, db: Session = Depends(get_db)) -> dict[str,
                 "experience_years": float(resume.experience_years) if resume.experience_years is not None else None,
                 "skills": [str(skill) for skill in skills_json],
                 "parse_error": resume.parse_error,
+                "parsed_json": parsed_json,
+                "raw_text_preview": (resume.raw_text or "")[:600],
                 "uploaded_at": link.created_at.isoformat() if link.created_at else None,
             }
         )
 
     return {"job_id": job_id, "count": len(items), "items": items}
+
+
+@router.get("/{job_id}/resumes/{resume_id}")
+def job_resume_detail_handler(job_id: str, resume_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+        parsed_resume_id = uuid.UUID(resume_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid UUID format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    row = db.execute(
+        select(JobResume, Resume, Candidate)
+        .join(Resume, Resume.id == JobResume.resume_id)
+        .join(Candidate, Candidate.id == JobResume.candidate_id)
+        .where(JobResume.job_id == parsed_job_id, JobResume.resume_id == parsed_resume_id)
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Resume not found for job")
+
+    link, resume, candidate = row
+    parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
+    return {
+        "job_resume_id": str(link.id),
+        "job_id": job_id,
+        "resume_id": str(resume.id),
+        "candidate_id": str(candidate.id),
+        "candidate_name": candidate.full_name or "Unknown Candidate",
+        "parse_status": resume.parse_status,
+        "parse_error": resume.parse_error,
+        "source_filename": resume.source_filename,
+        "parsed_json": parsed_json,
+        "raw_text": resume.raw_text or "",
+        "created_at": resume.created_at.isoformat() if resume.created_at else None,
+    }

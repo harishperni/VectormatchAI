@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -15,11 +16,12 @@ from app.services.embedding_service import (
     get_or_create_resume_embedding,
 )
 from app.services.llm_reasoning_service import OLLAMA_MODEL, generate_candidate_reasoning
+from app.services.location_service import distance_miles_between
 from app.services.scoring import weighted_score
 
 SCORING_VERSION = "score_v1.0"
 MODEL_VERSION = EMBEDDING_MODEL
-LLM_TOP_K = int(os.getenv("LLM_TOP_K", "5"))
+LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "false").lower() == "true"
 LLM_SCORE_WEIGHT = float(os.getenv("LLM_SCORE_WEIGHT", "0.2"))
 LLM_CONFIDENCE_WEIGHT = float(os.getenv("LLM_CONFIDENCE_WEIGHT", "0.3"))
@@ -58,6 +60,28 @@ def _semantic_score_fallback(job_description: str, resume_text: str) -> float:
         return 0.0
     overlap = job_tokens.intersection(resume_tokens)
     return round((len(overlap) / len(job_tokens)) * 100.0, 2)
+
+
+LOCATION_IN_TEXT_PATTERN = re.compile(
+    r"(?:location|based in)\s*[:\-]\s*([A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)(?:,\s*(?:USA|US|United States))?)",
+    re.IGNORECASE,
+)
+CITY_STATE_PATTERN = re.compile(r"\b([A-Za-z .'-]+,\s*[A-Z]{2})\b")
+
+
+def _resolve_job_location(job: Job | None) -> str | None:
+    if not job:
+        return None
+    if job.location and job.location.strip():
+        return job.location.strip()
+    description = job.description or ""
+    match = LOCATION_IN_TEXT_PATTERN.search(description)
+    if match:
+        return match.group(1).strip()
+    fallback = CITY_STATE_PATTERN.search(description)
+    if fallback:
+        return fallback.group(1).strip()
+    return None
 
 
 def _skill_score(job: Job, resume_skills: list[str]) -> tuple[float, list[str], list[str]]:
@@ -323,6 +347,9 @@ def get_rankings_for_job(
     sponsorship_required: bool | None = None,
     total_experience_min: float | None = None,
 ) -> list[dict]:
+    job = db.get(Job, job_id)
+    job_location = _resolve_job_location(job)
+
     rows = db.execute(
         select(Ranking, Candidate, Resume)
         .join(Candidate, Candidate.id == Ranking.candidate_id)
@@ -358,12 +385,12 @@ def get_rankings_for_job(
             for item in (resume.skills_json if isinstance(resume.skills_json, list) else [])
         ]
         candidate_action = action_by_candidate.get(str(ranking.candidate_id))
-        experience_years = float(resume.experience_years) if resume.experience_years is not None else 0.0
+        experience_years = float(resume.experience_years) if resume.experience_years is not None else None
         score = float(ranking.score)
 
         if min_score is not None and score < min_score:
             continue
-        if min_experience is not None and experience_years < min_experience:
+        if min_experience is not None and (experience_years is None or experience_years < min_experience):
             continue
         if skill and skill.lower() not in resume_skills:
             continue
@@ -388,7 +415,12 @@ def get_rankings_for_job(
         elif highest_degree and not isinstance(degree, str):
             continue
 
+        candidate_location = parsed_json.get("candidate_location") or candidate.location
         resume_distance = parsed_json.get("distance_miles")
+        if not isinstance(resume_distance, (int, float)):
+            computed_distance = distance_miles_between(job_location, candidate_location)
+            if computed_distance is not None:
+                resume_distance = computed_distance
         if distance_max is not None:
             if isinstance(resume_distance, (int, float)):
                 if float(resume_distance) > distance_max:
@@ -404,7 +436,9 @@ def get_rankings_for_job(
             else:
                 continue
 
-        if total_experience_min is not None and experience_years < total_experience_min:
+        if total_experience_min is not None and (
+            experience_years is None or experience_years < total_experience_min
+        ):
             continue
 
         if status:

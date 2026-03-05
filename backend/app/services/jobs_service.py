@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Job, User
-from app.schemas.jobs import JobCreate
+from app.schemas.jobs import JobCreate, JobUpdate
 
 DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
@@ -32,6 +32,7 @@ def create_job(db: Session, payload: JobCreate) -> Job:
         created_by=owner.id,
         title=payload.title,
         description=payload.description,
+        location=payload.location,
         min_experience_years=payload.min_experience_years,
         required_skills=payload.required_skills,
         nice_to_have_skills=payload.nice_to_have_skills,
@@ -51,3 +52,11 @@ def list_jobs(db: Session) -> list[Job]:
 
 def get_job(db: Session, job_id: uuid.UUID) -> Job | None:
     return db.get(Job, job_id)
+
+
+def update_job(db: Session, job: Job, payload: JobUpdate) -> Job:
+    job.location = payload.location
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job

@@ -153,7 +153,11 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                   <td className="px-3 py-2 text-slate-700">{row.stage ?? row.action_status ?? "Review"}</td>
                   <td className="px-3 py-2 text-slate-700">{row.step ?? "Review"}</td>
                   <td className="px-3 py-2 text-slate-700">{row.current_last_job ?? "-"}</td>
-                  <td className="px-3 py-2 text-slate-700">{row.experience_years} years</td>
+                  <td className="px-3 py-2 text-slate-700">
+                    {row.experience_years !== null && row.experience_years !== undefined
+                      ? `${row.experience_years} years`
+                      : "-"}
+                  </td>
                   <td className="px-3 py-2 text-slate-700">{row.highest_degree ?? "-"}</td>
                   <td className="px-3 py-2 text-slate-700">
                     {row.distance_miles !== null && row.distance_miles !== undefined

@@ -2,6 +2,7 @@ export type Job = {
   id: string;
   title: string;
   description: string;
+  location?: string | null;
   min_experience_years: number | null;
   required_skills: string[];
   nice_to_have_skills: string[];
@@ -19,7 +20,7 @@ export type RankingRow = {
   current_last_job?: string | null;
   score: number;
   confidence: number;
-  experience_years: number;
+  experience_years: number | null;
   highest_degree?: string | null;
   distance_miles?: number | null;
   sponsorship_required?: boolean | null;
@@ -38,6 +39,8 @@ export type ParsedResumeRow = {
   experience_years: number | null;
   skills: string[];
   parse_error: string | null;
+  parsed_json?: Record<string, unknown>;
+  raw_text_preview?: string | null;
   uploaded_at: string | null;
 };
 

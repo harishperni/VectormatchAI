@@ -40,14 +40,21 @@
   - `cd backend && source .venv/bin/activate && pip install -r requirements.txt`
 
 ## Ollama LLM reasoning
-- Ranking now calls Ollama for top candidates (default top 5) to generate summary/reasons.
+- Ranking now calls Ollama for top candidates (default top 1) to generate summary/reasons.
 - Defaults:
   - `OLLAMA_BASE_URL=http://localhost:11434`
   - `OLLAMA_MODEL=llama3.1:8b`
-  - `LLM_TOP_K=5`
+  - `LLM_TOP_K=1`
+  - `OLLAMA_TIMEOUT_SECONDS=20`
 - Optional LLM score blending (off by default):
   - `ENABLE_LLM_SCORING=true`
   - `LLM_SCORE_WEIGHT=0.2`
   - `LLM_CONFIDENCE_WEIGHT=0.3`
 - Pull a model first (one-time):
   - `ollama pull llama3.1:8b`
+
+## Distance filter behavior
+- Distance is computed between `jobs.location` and candidate location extracted from resume text.
+- Geocoding uses OpenStreetMap Nominatim at ranking/filter time with local in-process cache.
+- Set `location` when creating a job (`POST /api/v1/jobs`) for best distance results.
+- You can set/update an existing job location with `PATCH /api/v1/jobs/{job_id}`.

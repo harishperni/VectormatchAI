@@ -1,0 +1,194 @@
+export type Job = {
+  id: string;
+  title: string;
+  description: string;
+  min_experience_years: number | null;
+  required_skills: string[];
+  nice_to_have_skills: string[];
+  domain_tags: string[];
+};
+
+export type RankingRow = {
+  candidate_id: string;
+  resume_id: string;
+  candidate_name: string;
+  candidate_type?: string | null;
+  applied_at?: string | null;
+  stage?: string | null;
+  step?: string | null;
+  current_last_job?: string | null;
+  score: number;
+  confidence: number;
+  experience_years: number;
+  highest_degree?: string | null;
+  distance_miles?: number | null;
+  sponsorship_required?: boolean | null;
+  top_reasons: string[];
+  action_status?: string | null;
+};
+
+export type ParsedResumeRow = {
+  job_resume_id: string;
+  candidate_id: string;
+  resume_id: string;
+  candidate_name: string;
+  email: string | null;
+  source_filename: string | null;
+  parse_status: "pending" | "parsed" | "failed";
+  experience_years: number | null;
+  skills: string[];
+  parse_error: string | null;
+  uploaded_at: string | null;
+};
+
+type RankingListResponse = {
+  job_id: string;
+  count: number;
+  items: RankingRow[];
+};
+
+type JobResumesResponse = {
+  job_id: string;
+  count: number;
+  items: ParsedResumeRow[];
+};
+
+export type ExplanationSnippet = {
+  label: string;
+  text: string;
+};
+
+export type CandidateExplanation = {
+  score_breakdown: {
+    semantic: number;
+    skill: number;
+    experience: number;
+    domain: number;
+  };
+  matched_skills: string[];
+  missing_skills: string[];
+  evidence_snippets: ExplanationSnippet[];
+  summary: string;
+  model_version: string;
+  scoring_version: string;
+  base_score?: number | null;
+  llm_score?: number | null;
+  final_score?: number | null;
+  base_confidence?: number | null;
+  llm_confidence?: number | null;
+  final_confidence?: number | null;
+  llm_used?: boolean;
+  confidence_reasoning?: string | null;
+  strengths?: string[];
+};
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+export async function fetchJobs(): Promise<Job[]> {
+  const response = await fetch(`${API_BASE}/api/v1/jobs`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch jobs: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchJob(jobId: string): Promise<Job | null> {
+  const response = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`, {
+    cache: "no-store",
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to fetch job ${jobId}: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchRankings(
+  jobId: string,
+  filters?: {
+    min_score?: number;
+    min_experience?: number;
+    skill?: string;
+    action?: string;
+    keyword?: string;
+    status?: string;
+    highest_degree?: string;
+    distance_max?: number;
+    sponsorship_required?: boolean;
+    total_experience_min?: number;
+  }
+): Promise<RankingRow[]> {
+  const params = new URLSearchParams();
+  if (filters?.min_score !== undefined) params.set("min_score", String(filters.min_score));
+  if (filters?.min_experience !== undefined) {
+    params.set("min_experience", String(filters.min_experience));
+  }
+  if (filters?.skill) params.set("skill", filters.skill);
+  if (filters?.action) params.set("action", filters.action);
+  if (filters?.keyword) params.set("keyword", filters.keyword);
+  if (filters?.status) params.set("status", filters.status);
+  if (filters?.highest_degree) params.set("highest_degree", filters.highest_degree);
+  if (filters?.distance_max !== undefined) params.set("distance_max", String(filters.distance_max));
+  if (filters?.sponsorship_required !== undefined) {
+    params.set("sponsorship_required", String(filters.sponsorship_required));
+  }
+  if (filters?.total_experience_min !== undefined) {
+    params.set("total_experience_min", String(filters.total_experience_min));
+  }
+
+  const response = await fetch(
+    `${API_BASE}/api/v1/jobs/${jobId}/rankings${params.toString() ? `?${params.toString()}` : ""}`,
+    {
+    cache: "no-store",
+    }
+  );
+  if (response.status === 404) {
+    return [];
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to fetch rankings for job ${jobId}: ${response.status}`);
+  }
+
+  const payload = (await response.json()) as RankingListResponse;
+  return payload.items;
+}
+
+export async function fetchCandidateExplanation(
+  jobId: string,
+  candidateId: string
+): Promise<CandidateExplanation | null> {
+  const response = await fetch(
+    `${API_BASE}/api/v1/jobs/${jobId}/candidates/${candidateId}/explanation`,
+    {
+      cache: "no-store",
+    }
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch candidate explanation for job ${jobId}, candidate ${candidateId}: ${response.status}`
+    );
+  }
+  return response.json();
+}
+
+export async function fetchJobResumes(jobId: string): Promise<ParsedResumeRow[]> {
+  const response = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/resumes`, {
+    cache: "no-store",
+  });
+  if (response.status === 404) {
+    return [];
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to fetch resumes for job ${jobId}: ${response.status}`);
+  }
+
+  const payload = (await response.json()) as JobResumesResponse;
+  return payload.items;
+}

@@ -1,0 +1,7 @@
+{
+  "name": "ats-monorepo",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ]
+}

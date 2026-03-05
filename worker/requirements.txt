@@ -1,0 +1,6 @@
+dramatiq==1.17.1
+redis==6.4.0
+pydantic==2.11.7
+psycopg[binary]==3.2.10
+PyMuPDF==1.26.4
+python-docx==1.2.0

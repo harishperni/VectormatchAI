@@ -26,6 +26,32 @@ export type RankingRow = {
   sponsorship_required?: boolean | null;
   top_reasons: string[];
   action_status?: string | null;
+  audit_flags?: string[];
+};
+
+export type EvaluationDiffRow = {
+  candidate_id: string;
+  candidate_name: string;
+  current_rank: number;
+  previous_rank: number | null;
+  score_delta: number | null;
+  top_reasons: string[];
+};
+
+export type JobEvaluation = {
+  job_id: string;
+  top_k: number;
+  current_count: number;
+  precision_at_k: number | null;
+  recall_at_k: number | null;
+  expected_total: number;
+  matched_expected: number;
+  expected_reference: string | null;
+  score_summary: {
+    average_score: number;
+    average_confidence: number;
+  };
+  run_diff: EvaluationDiffRow[];
 };
 
 export type ParsedResumeRow = {
@@ -194,4 +220,17 @@ export async function fetchJobResumes(jobId: string): Promise<ParsedResumeRow[]>
 
   const payload = (await response.json()) as JobResumesResponse;
   return payload.items;
+}
+
+export async function fetchJobEvaluation(jobId: string, topK = 5): Promise<JobEvaluation | null> {
+  const response = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/evaluation?top_k=${topK}`, {
+    cache: "no-store",
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to fetch evaluation for job ${jobId}: ${response.status}`);
+  }
+  return response.json();
 }

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
 
-from app.db.models import Candidate, Job, JobResume, Ranking, RecruiterAction, Resume
+from app.db.models import AuditLog, Candidate, Job, JobResume, Ranking, RecruiterAction, Resume
 from app.services.embedding_service import (
     EMBEDDING_MODEL,
     cosine_similarity_percent,
@@ -129,6 +129,29 @@ def _confidence_score(resume: Resume, resume_text: str, skills: list[str]) -> fl
     if resume.experience_years is not None:
         score += 15.0
     return round(min(100.0, score), 2)
+
+
+def _explainability_audit_flags(
+    *,
+    score: float,
+    confidence: float,
+    score_breakdown: dict[str, float],
+    matched_skills: list[str],
+    missing_skills: list[str],
+) -> list[str]:
+    flags: list[str] = []
+    semantic = float(score_breakdown.get("semantic", 0.0))
+    experience = float(score_breakdown.get("experience", 0.0))
+
+    if score >= 80 and len(missing_skills) >= 2:
+        flags.append("High score despite multiple missing skills")
+    if semantic < 35 and score >= 75:
+        flags.append("High final score but low semantic similarity")
+    if confidence >= 95 and not matched_skills:
+        flags.append("Very high confidence with weak skill evidence")
+    if experience <= 10 and score >= 70:
+        flags.append("Strong rank even though experience signal is weak")
+    return flags
 
 
 def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputation:
@@ -328,6 +351,36 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             )
         processed += 1
 
+    ranked_for_audit = sorted(pending_rows, key=lambda item: item[1].final, reverse=True)
+    top_snapshot = []
+    for rank, (resume, result, explanation_json) in enumerate(ranked_for_audit[:20], start=1):
+        top_snapshot.append(
+            {
+                "rank": rank,
+                "candidate_id": str(resume.candidate_id),
+                "resume_id": str(resume.id),
+                "score": result.final,
+                "confidence": result.confidence,
+                "top_reasons": explanation_json.get("top_reasons", []),
+            }
+        )
+    avg_score = round(
+        sum(item[1].final for item in ranked_for_audit) / len(ranked_for_audit), 2
+    ) if ranked_for_audit else 0.0
+    db.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            entity_type="job",
+            entity_id=job.id,
+            event_type="ranking_run_completed",
+            payload={
+                "processed_resumes": processed,
+                "average_score": avg_score,
+                "top_candidates": top_snapshot,
+            },
+        )
+    )
+
     db.commit()
     return processed
 
@@ -470,6 +523,19 @@ def get_rankings_for_job(
                 "sponsorship_required": sponsorship if isinstance(sponsorship, bool) else None,
                 "top_reasons": reasons[:3] if isinstance(reasons, list) else [],
                 "action_status": candidate_action,
+                "audit_flags": _explainability_audit_flags(
+                    score=score,
+                    confidence=float(ranking.confidence),
+                    score_breakdown=payload.get("score_breakdown", {})
+                    if isinstance(payload.get("score_breakdown", {}), dict)
+                    else {},
+                    matched_skills=payload.get("matched_skills", [])
+                    if isinstance(payload.get("matched_skills", []), list)
+                    else [],
+                    missing_skills=payload.get("missing_skills", [])
+                    if isinstance(payload.get("missing_skills", []), list)
+                    else [],
+                ),
             }
         )
     return output

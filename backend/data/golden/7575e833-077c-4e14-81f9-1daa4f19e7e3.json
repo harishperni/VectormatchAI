@@ -1,0 +1,9 @@
+{
+  "job_id": "7575e833-077c-4e14-81f9-1daa4f19e7e3",
+  "expected_top_candidate_ids": [
+    "candidate-uuid-1"
+  ],
+  "expected_top_candidate_names": [
+    "John Doe"
+  ]
+}

@@ -18,6 +18,7 @@ class RankingRow(BaseModel):
     sponsorship_required: bool | None = None
     top_reasons: list[str]
     action_status: str | None = None
+    audit_flags: list[str] = Field(default_factory=list)
 
 
 class RankingListResponse(BaseModel):
@@ -48,3 +49,42 @@ class ExplanationResponse(BaseModel):
 class CandidateActionRequest(BaseModel):
     action: str
     notes: str | None = None
+
+
+class CandidateBulkActionRequest(BaseModel):
+    candidate_ids: list[str] = Field(default_factory=list)
+    action: str
+    notes: str | None = None
+
+
+class RankingDiffRow(BaseModel):
+    candidate_id: str
+    candidate_name: str
+    current_rank: int
+    previous_rank: int | None = None
+    score_delta: float | None = None
+    top_reasons: list[str] = Field(default_factory=list)
+
+
+class EvaluationResponse(BaseModel):
+    job_id: str
+    top_k: int
+    current_count: int
+    precision_at_k: float | None = None
+    recall_at_k: float | None = None
+    expected_total: int = 0
+    matched_expected: int = 0
+    expected_reference: str | None = None
+    score_summary: dict[str, float]
+    run_diff: list[RankingDiffRow] = Field(default_factory=list)
+
+
+class GoldenDatasetPayload(BaseModel):
+    expected_top_candidate_ids: list[str] = Field(default_factory=list)
+    expected_top_candidate_names: list[str] = Field(default_factory=list)
+
+
+class GoldenDatasetResponse(BaseModel):
+    job_id: str
+    expected_top_candidate_ids: list[str] = Field(default_factory=list)
+    expected_top_candidate_names: list[str] = Field(default_factory=list)

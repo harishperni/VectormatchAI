@@ -1,0 +1,12 @@
+{
+  "job_id": "replace-with-job-id",
+  "expected_top_candidate_ids": [
+    "candidate-uuid-1",
+    "candidate-uuid-2"
+  ],
+  "expected_top_candidate_names": [
+    "john doe",
+    "alice lee"
+  ]
+}
+

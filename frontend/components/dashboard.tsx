@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import CreateJobForm from "@/components/create-job-form";
 import { Job } from "@/lib/api";
 
 export default function Dashboard({ jobs }: { jobs: Job[] }) {
@@ -10,9 +11,11 @@ export default function Dashboard({ jobs }: { jobs: Job[] }) {
         <p className="text-lg text-slate-600">AI-ranked candidate pipelines with explainable scoring</p>
       </header>
 
+      <CreateJobForm />
+
       {jobs.length === 0 ? (
         <section className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">
-          No jobs found yet. Create one via API (`POST /api/v1/jobs`) and refresh.
+          No jobs found yet. Create one using the form above.
         </section>
       ) : null}
 

@@ -4,7 +4,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas.rankings import CandidateActionRequest, ExplanationResponse, RankingListResponse
+from app.schemas.rankings import (
+    CandidateActionRequest,
+    CandidateBulkActionRequest,
+    EvaluationResponse,
+    ExplanationResponse,
+    GoldenDatasetPayload,
+    GoldenDatasetResponse,
+    RankingDiffRow,
+    RankingListResponse,
+)
+from app.services.evaluation_service import (
+    get_recent_ranking_run_payloads,
+    load_golden_dataset,
+    save_golden_dataset,
+    resolve_expected_ids,
+)
 from app.services.jobs_service import DEFAULT_USER_ID, get_job
 from app.services.ranking_service import (
     SCORING_VERSION,
@@ -130,3 +145,170 @@ def candidate_action(
         "action": row.action,
         "status": "saved",
     }
+
+
+@router.post("/{job_id}/candidates/actions")
+def bulk_candidate_action(
+    job_id: str,
+    payload: CandidateBulkActionRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, str | int]:
+    valid_actions = {"viewed", "shortlisted", "rejected", "interviewed", "hired"}
+    if payload.action not in valid_actions:
+        raise HTTPException(status_code=400, detail="Invalid action value")
+
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid job_id format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    saved = 0
+    skipped = 0
+    for candidate_id in payload.candidate_ids:
+        try:
+            parsed_candidate_id = uuid.UUID(candidate_id)
+        except ValueError:
+            skipped += 1
+            continue
+        add_candidate_action(
+            db,
+            job_id=parsed_job_id,
+            candidate_id=parsed_candidate_id,
+            action=payload.action,
+            notes=payload.notes,
+            created_by=DEFAULT_USER_ID,
+        )
+        saved += 1
+
+    return {
+        "job_id": job_id,
+        "status": "saved",
+        "saved_count": saved,
+        "skipped_count": skipped,
+    }
+
+
+@router.get("/{job_id}/evaluation", response_model=EvaluationResponse)
+def evaluate_job(
+    job_id: str,
+    top_k: int = Query(default=5, ge=1, le=50),
+    db: Session = Depends(get_db),
+) -> EvaluationResponse:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid job_id format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    rows = get_rankings_for_job(db, parsed_job_id)
+    current_top = rows[:top_k]
+
+    avg_score = round(sum(float(row["score"]) for row in rows) / len(rows), 2) if rows else 0.0
+    avg_confidence = (
+        round(sum(float(row["confidence"]) for row in rows) / len(rows), 2) if rows else 0.0
+    )
+
+    dataset = load_golden_dataset(job_id)
+    expected_ids, expected_reference = resolve_expected_ids(dataset, rows)
+    matched_expected = sum(1 for row in current_top if row["candidate_id"] in expected_ids)
+    precision_at_k = None
+    recall_at_k = None
+    if expected_ids:
+        precision_at_k = round((matched_expected / top_k) * 100.0, 2)
+        recall_at_k = round((matched_expected / len(expected_ids)) * 100.0, 2)
+
+    run_payloads = get_recent_ranking_run_payloads(db, parsed_job_id, limit=2)
+    previous_index: dict[str, tuple[int, float]] = {}
+    if len(run_payloads) >= 2:
+        previous_top = run_payloads[1].get("top_candidates", [])
+        if isinstance(previous_top, list):
+            for item in previous_top:
+                if isinstance(item, dict):
+                    candidate_id = str(item.get("candidate_id") or "")
+                    rank_value = item.get("rank")
+                    score_value = item.get("score")
+                    if candidate_id and isinstance(rank_value, int):
+                        previous_index[candidate_id] = (
+                            rank_value,
+                            float(score_value) if isinstance(score_value, (int, float)) else 0.0,
+                        )
+
+    run_diff: list[RankingDiffRow] = []
+    for idx, row in enumerate(current_top, start=1):
+        prev = previous_index.get(row["candidate_id"])
+        run_diff.append(
+            RankingDiffRow(
+                candidate_id=row["candidate_id"],
+                candidate_name=row["candidate_name"],
+                current_rank=idx,
+                previous_rank=prev[0] if prev else None,
+                score_delta=round(float(row["score"]) - prev[1], 2) if prev else None,
+                top_reasons=row.get("top_reasons", []),
+            )
+        )
+
+    return EvaluationResponse(
+        job_id=job_id,
+        top_k=top_k,
+        current_count=len(rows),
+        precision_at_k=precision_at_k,
+        recall_at_k=recall_at_k,
+        expected_total=len(expected_ids),
+        matched_expected=matched_expected,
+        expected_reference=expected_reference,
+        score_summary={"average_score": avg_score, "average_confidence": avg_confidence},
+        run_diff=run_diff,
+    )
+
+
+@router.get("/{job_id}/golden-dataset", response_model=GoldenDatasetResponse)
+def get_golden_dataset(job_id: str, db: Session = Depends(get_db)) -> GoldenDatasetResponse:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid job_id format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    dataset = load_golden_dataset(job_id) or {}
+    return GoldenDatasetResponse(
+        job_id=job_id,
+        expected_top_candidate_ids=dataset.get("expected_top_candidate_ids", []),
+        expected_top_candidate_names=dataset.get("expected_top_candidate_names", []),
+    )
+
+
+@router.post("/{job_id}/golden-dataset", response_model=GoldenDatasetResponse)
+def upsert_golden_dataset(
+    job_id: str, payload: GoldenDatasetPayload, db: Session = Depends(get_db)
+) -> GoldenDatasetResponse:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid job_id format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    try:
+        stored = save_golden_dataset(
+            job_id,
+            {
+                "expected_top_candidate_ids": payload.expected_top_candidate_ids,
+                "expected_top_candidate_names": payload.expected_top_candidate_names,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return GoldenDatasetResponse(
+        job_id=job_id,
+        expected_top_candidate_ids=stored.get("expected_top_candidate_ids", []),
+        expected_top_candidate_names=stored.get("expected_top_candidate_names", []),
+    )

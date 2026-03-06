@@ -22,4 +22,3 @@ export async function POST(
     headers: { "content-type": contentType },
   });
 }
-

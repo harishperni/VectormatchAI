@@ -24,6 +24,7 @@ from app.services.jobs_service import DEFAULT_USER_ID, get_job
 from app.services.ranking_service import (
     SCORING_VERSION,
     add_candidate_action,
+    clear_candidate_action,
     get_candidate_explanation,
     get_rankings_for_job,
     run_ranking_for_job,
@@ -118,7 +119,7 @@ def candidate_action(
     payload: CandidateActionRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    valid_actions = {"viewed", "shortlisted", "rejected", "interviewed", "hired"}
+    valid_actions = {"viewed", "shortlisted", "rejected", "interviewed", "hired", "reset"}
     if payload.action not in valid_actions:
         raise HTTPException(status_code=400, detail="Invalid action value")
 
@@ -130,6 +131,18 @@ def candidate_action(
 
     if not get_job(db, parsed_job_id):
         raise HTTPException(status_code=404, detail="Job not found")
+
+    if payload.action == "reset":
+        cleared = clear_candidate_action(
+            db, job_id=parsed_job_id, candidate_id=parsed_candidate_id
+        )
+        return {
+            "job_id": job_id,
+            "candidate_id": candidate_id,
+            "action": "reset",
+            "status": "cleared",
+            "cleared_count": str(cleared),
+        }
 
     row = add_candidate_action(
         db,
@@ -153,7 +166,7 @@ def bulk_candidate_action(
     payload: CandidateBulkActionRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, str | int]:
-    valid_actions = {"viewed", "shortlisted", "rejected", "interviewed", "hired"}
+    valid_actions = {"viewed", "shortlisted", "rejected", "interviewed", "hired", "reset"}
     if payload.action not in valid_actions:
         raise HTTPException(status_code=400, detail="Invalid action value")
 
@@ -173,19 +186,24 @@ def bulk_candidate_action(
         except ValueError:
             skipped += 1
             continue
-        add_candidate_action(
-            db,
-            job_id=parsed_job_id,
-            candidate_id=parsed_candidate_id,
-            action=payload.action,
-            notes=payload.notes,
-            created_by=DEFAULT_USER_ID,
-        )
+        if payload.action == "reset":
+            clear_candidate_action(
+                db, job_id=parsed_job_id, candidate_id=parsed_candidate_id
+            )
+        else:
+            add_candidate_action(
+                db,
+                job_id=parsed_job_id,
+                candidate_id=parsed_candidate_id,
+                action=payload.action,
+                notes=payload.notes,
+                created_by=DEFAULT_USER_ID,
+            )
         saved += 1
 
     return {
         "job_id": job_id,
-        "status": "saved",
+        "status": "saved" if payload.action != "reset" else "cleared",
         "saved_count": saved,
         "skipped_count": skipped,
     }

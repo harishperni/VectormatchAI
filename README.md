@@ -51,6 +51,11 @@
 - In `/jobs/{job_id}`, select candidates using checkboxes in the Applicants table.
 - Use `Bulk Recommend`, `Bulk Reject`, or `Recommend Other Jobs`.
 
+## Candidate pipeline
+- In `/jobs/{job_id}`, the `Candidate Pipeline` board shows stages:
+  - New, Review, Shortlisted, Interview, Offer, Rejected
+- Quick action buttons update candidate stage immediately.
+
 ## Evaluation + golden dataset
 - Open `/jobs/{job_id}/evaluation` to view:
   - Precision/Recall at top-K (if golden data exists)
@@ -70,19 +75,33 @@
 - Install latest backend requirements after pulling changes:
   - `cd backend && source .venv/bin/activate && pip install -r requirements.txt`
 
-## Ollama LLM reasoning
-- Ranking now calls Ollama for top candidates (default top 1) to generate summary/reasons.
+## OpenAI LLM reasoning
+- Ranking now calls OpenAI for all ranked candidates (GPT-driven scoring + analysis).
+- Required:
+  - `OPENAI_API_KEY=<your_key>`
 - Defaults:
-  - `OLLAMA_BASE_URL=http://localhost:11434`
-  - `OLLAMA_MODEL=llama3.1:8b`
-  - `LLM_TOP_K=1`
-  - `OLLAMA_TIMEOUT_SECONDS=20`
+  - `OPENAI_API_BASE_URL=https://api.openai.com/v1`
+  - `OPENAI_REASONING_MODEL=gpt-4.1-mini`
+  - `LLM_TOP_K=1000`
+  - `OPENAI_TIMEOUT_SECONDS=20`
+- GPT-only score mode (default enabled):
+  - `GPT_ONLY_RANKING=true`
 - Optional LLM score blending (off by default):
   - `ENABLE_LLM_SCORING=true`
   - `LLM_SCORE_WEIGHT=0.2`
   - `LLM_CONFIDENCE_WEIGHT=0.3`
-- Pull a model first (one-time):
-  - `ollama pull llama3.1:8b`
+
+## Optional LLM parsing fallback (worker)
+- Uses OpenAI to fill missing fields when heuristic parsing is weak.
+- Enable:
+  - `OPENAI_API_KEY=<your_key>`
+  - `ENABLE_LLM_PARSE=true`
+  - `OPENAI_PARSE_MODEL=gpt-4.1-mini`
+  - `LLM_PARSE_TIMEOUT_SECONDS=30`
+- Force GPT-only parsing (no heuristic fields):
+  - `LLM_PARSE_ONLY=true`
+- GPT parse now extracts `current_last_job` and prefers GPT `experience_years`
+  while excluding education duration from work experience.
 
 ## Distance filter behavior
 - Distance is computed between `jobs.location` and candidate location extracted from resume text.

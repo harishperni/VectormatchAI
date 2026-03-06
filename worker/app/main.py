@@ -14,9 +14,13 @@ import redis
 from docx import Document
 from psycopg.types.json import Json
 
+from app.llm_parse import parse_resume_with_llm
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 INGESTION_QUEUE_KEY = os.getenv("INGESTION_QUEUE_KEY", "resume_ingestion_queue")
 WORKER_DATABASE_URL = os.getenv("WORKER_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/ats")
+ENABLE_LLM_PARSE = os.getenv("ENABLE_LLM_PARSE", "false").lower() == "true"
+LLM_PARSE_ONLY = os.getenv("LLM_PARSE_ONLY", "false").lower() == "true"
 
 SKILL_KEYWORDS = [
     "python",
@@ -229,6 +233,58 @@ def extract_resume_features(text: str) -> dict[str, Any]:
     }
 
 
+def _parse_quality_is_weak(parsed: dict[str, Any]) -> bool:
+    missing_email = not parsed.get("email")
+    missing_skills = not parsed.get("skills")
+    missing_experience = parsed.get("experience_years") is None
+    return (missing_email and missing_skills) or (missing_skills and missing_experience)
+
+
+def _merge_llm_fields(parsed: dict[str, Any], llm_parsed: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(parsed)
+    for key in ("email", "phone", "highest_degree", "candidate_location", "current_last_job"):
+        if not merged.get(key) and llm_parsed.get(key):
+            merged[key] = llm_parsed.get(key)
+
+    heuristic_experience = merged.get("experience_years")
+    llm_experience = llm_parsed.get("experience_years")
+    llm_experience_value: float | None = None
+    if isinstance(llm_experience, (int, float)):
+        llm_experience_value = round(float(llm_experience), 1)
+    elif isinstance(llm_experience, str):
+        try:
+            llm_experience_value = round(float(llm_experience), 1)
+        except ValueError:
+            pass
+
+    if llm_experience_value is not None:
+        if isinstance(heuristic_experience, (int, float)):
+            # Guard against low LLM undercounts by keeping the stronger estimate.
+            merged["experience_years"] = round(
+                max(float(heuristic_experience), llm_experience_value), 1
+            )
+            merged["experience_source"] = "llm_plus_heuristic"
+        else:
+            merged["experience_years"] = llm_experience_value
+            merged["experience_source"] = "llm_preferred"
+
+    llm_skills = llm_parsed.get("skills")
+    if isinstance(llm_skills, list) and llm_skills:
+        combined = {*(merged.get("skills") or []), *(str(s).lower() for s in llm_skills)}
+        merged["skills"] = sorted(combined)
+
+    current_last_job = merged.get("current_last_job")
+    if isinstance(current_last_job, str):
+        cleaned = current_last_job.strip()
+        if "|" in cleaned:
+            cleaned = cleaned.split("|", 1)[1].strip()
+        cleaned = re.split(r"\s{2,}|,|\s+\|\s+", cleaned)[0].strip()
+        if cleaned:
+            merged["current_last_job"] = cleaned
+
+    return merged
+
+
 def mark_resume_failed(resume_id: str, error: str) -> None:
     with psycopg.connect(WORKER_DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -340,6 +396,31 @@ def run_ingestion_worker() -> None:
                 raise ValueError("No extractable text found in resume")
 
             parsed = extract_resume_features(text)
+            if ENABLE_LLM_PARSE:
+                llm_parsed = parse_resume_with_llm(text)
+                if llm_parsed:
+                    if LLM_PARSE_ONLY:
+                        parsed = _merge_llm_fields(
+                            {
+                                "email": None,
+                                "phone": None,
+                                "skills": [],
+                                "experience_years": None,
+                                "experience_source": "llm_only",
+                                "highest_degree": None,
+                                "sponsorship_required": None,
+                                "distance_miles": None,
+                                "candidate_location": None,
+                                "current_last_job": None,
+                            },
+                            llm_parsed,
+                        )
+                        parsed["experience_source"] = "llm_only"
+                    elif _parse_quality_is_weak(parsed):
+                        parsed = _merge_llm_fields(parsed, llm_parsed)
+                    else:
+                        # Even with decent heuristic parse, prefer LLM for fragile fields.
+                        parsed = _merge_llm_fields(parsed, llm_parsed)
             persist_parsed_resume(resume_id, text, parsed)
             time.sleep(0.2)
             print(f"[DONE] resume={resume_id}")

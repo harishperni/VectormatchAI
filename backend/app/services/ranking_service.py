@@ -15,16 +15,17 @@ from app.services.embedding_service import (
     get_or_create_job_embedding,
     get_or_create_resume_embedding,
 )
-from app.services.llm_reasoning_service import OLLAMA_MODEL, generate_candidate_reasoning
+from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 from app.services.scoring import weighted_score
 
-SCORING_VERSION = "score_v1.0"
+SCORING_VERSION = "score_v2_gpt_only"
 MODEL_VERSION = EMBEDDING_MODEL
-LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1"))
+LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "false").lower() == "true"
 LLM_SCORE_WEIGHT = float(os.getenv("LLM_SCORE_WEIGHT", "0.2"))
 LLM_CONFIDENCE_WEIGHT = float(os.getenv("LLM_CONFIDENCE_WEIGHT", "0.3"))
+GPT_ONLY_RANKING = os.getenv("GPT_ONLY_RANKING", "true").lower() == "true"
 
 
 @dataclass
@@ -207,27 +208,11 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         .all()
     )
     processed = 0
-    job_embedding_row = None
-    try:
-        job_embedding_row = get_or_create_job_embedding(db, job)
-    except Exception:
-        # Keep ranking functional even if embedding model/deps are not ready.
-        job_embedding_row = None
 
     pending_rows: list[tuple[Resume, RankingComputation, dict]] = []
     for resume in resumes:
-        semantic = 0.0
-        if job_embedding_row:
-            try:
-                resume_embedding_row = get_or_create_resume_embedding(db, resume)
-                semantic = cosine_similarity_percent(
-                    job_embedding_row.embedding, resume_embedding_row.embedding
-                )
-            except Exception:
-                semantic = _semantic_score_fallback(job.description or "", resume.raw_text or "")
-        else:
-            semantic = _semantic_score_fallback(job.description or "", resume.raw_text or "")
-
+        # Keep heuristic baseline only as LLM context/fallback.
+        semantic = _semantic_score_fallback(job.description or "", resume.raw_text or "")
         result = compute_ranking(job, resume, semantic)
         explanation_json: dict = {
             "score_breakdown": {
@@ -259,7 +244,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         }
         pending_rows.append((resume, result, explanation_json))
 
-    # Apply LLM reasoning for top-K candidates by score.
+    # Apply LLM reasoning + scoring for all candidates (or capped by env).
     ranked_candidates = sorted(pending_rows, key=lambda item: item[1].final, reverse=True)
     for resume, result, explanation_json in ranked_candidates[: max(0, LLM_TOP_K)]:
         llm_output = generate_candidate_reasoning(
@@ -272,6 +257,31 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         )
         if not llm_output:
             continue
+        score_breakdown = llm_output.get("score_breakdown")
+        if isinstance(score_breakdown, dict):
+            semantic = _to_float(score_breakdown.get("semantic"))
+            skill = _to_float(score_breakdown.get("skill"))
+            experience = _to_float(score_breakdown.get("experience"))
+            domain = _to_float(score_breakdown.get("domain"))
+            if semantic is not None:
+                result.semantic = _clamp_0_100(semantic)
+            if skill is not None:
+                result.skill = _clamp_0_100(skill)
+            if experience is not None:
+                result.experience = _clamp_0_100(experience)
+            if domain is not None:
+                result.domain = _clamp_0_100(domain)
+            explanation_json["score_breakdown"] = {
+                "semantic": result.semantic,
+                "skill": result.skill,
+                "experience": result.experience,
+                "domain": result.domain,
+            }
+
+        matched = llm_output.get("matched_skills")
+        if isinstance(matched, list):
+            explanation_json["matched_skills"] = [str(item) for item in matched][:8]
+            result.matched_skills = [str(item) for item in matched][:8]
         summary = llm_output.get("summary")
         strengths = llm_output.get("strengths")
         missing = llm_output.get("missing_skills")
@@ -294,14 +304,18 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         if llm_score is not None:
             llm_score = _clamp_0_100(llm_score)
             explanation_json["llm_score"] = llm_score
-            if ENABLE_LLM_SCORING:
+            if GPT_ONLY_RANKING:
+                result.final = llm_score
+            elif ENABLE_LLM_SCORING:
                 result.final = _clamp_0_100(
                     ((1.0 - LLM_SCORE_WEIGHT) * result.final) + (LLM_SCORE_WEIGHT * llm_score)
                 )
         if llm_confidence is not None:
             llm_confidence = _clamp_0_100(llm_confidence)
             explanation_json["llm_confidence"] = llm_confidence
-            if ENABLE_LLM_SCORING:
+            if GPT_ONLY_RANKING:
+                result.confidence = llm_confidence
+            elif ENABLE_LLM_SCORING:
                 result.confidence = _clamp_0_100(
                     ((1.0 - LLM_CONFIDENCE_WEIGHT) * result.confidence)
                     + (LLM_CONFIDENCE_WEIGHT * llm_confidence)
@@ -310,7 +324,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         explanation_json["final_score"] = result.final
         explanation_json["final_confidence"] = result.confidence
         explanation_json["llm_used"] = True
-        explanation_json["reasoning_model"] = OLLAMA_MODEL
+        explanation_json["reasoning_model"] = OPENAI_REASONING_MODEL
 
     for resume, result, explanation_json in pending_rows:
         existing = db.execute(
@@ -611,3 +625,14 @@ def add_candidate_action(
     db.commit()
     db.refresh(row)
     return row
+
+
+def clear_candidate_action(db: Session, *, job_id: uuid.UUID, candidate_id: uuid.UUID) -> int:
+    result = db.execute(
+        delete(RecruiterAction).where(
+            RecruiterAction.job_id == job_id,
+            RecruiterAction.candidate_id == candidate_id,
+        )
+    )
+    db.commit()
+    return result.rowcount or 0

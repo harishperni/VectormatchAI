@@ -1,8 +1,5 @@
-import CandidateReviewWorkspace from "@/components/candidate-review-workspace";
+import JobWorkspace from "@/components/job-workspace";
 import JobsFilterPanel from "@/components/jobs-filter-panel";
-import ParsedResumesTable from "@/components/parsed-resumes-table";
-import ResumeUploadPanel from "@/components/resume-upload-panel";
-import Link from "next/link";
 import {
   fetchJob,
   fetchJobResumes,
@@ -100,17 +97,9 @@ export default async function JobRankingPage({
 
   return (
     <main className="mx-auto w-[98%] max-w-none px-3 py-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="font-heading text-3xl font-bold text-ink">{job?.title ?? "Candidate Rankings"}</h1>
-          <p className="mt-2 text-slate-600">Job ID: {jobId}</p>
-        </div>
-        <Link
-          href={`/jobs/${jobId}/evaluation`}
-          className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700"
-        >
-          Evaluation
-        </Link>
+      <div>
+        <h1 className="font-heading text-3xl font-bold text-ink">{job?.title ?? "Candidate Rankings"}</h1>
+        <p className="mt-2 text-slate-600">Job ID: {jobId}</p>
       </div>
       {!job ? (
         <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
@@ -141,11 +130,7 @@ export default async function JobRankingPage({
           }}
         />
 
-        <div className="space-y-4">
-          <ResumeUploadPanel jobId={jobId} />
-          <CandidateReviewWorkspace jobId={jobId} rows={rankings} resumes={resumes} />
-          <ParsedResumesTable jobId={jobId} rows={resumes} />
-        </div>
+        <JobWorkspace jobId={jobId} rankings={rankings} resumes={resumes} />
       </section>
     </main>
   );

@@ -51,6 +51,10 @@ DATE_LOCATION_LINE_PATTERN = re.compile(
 
 DATE_RANGE_PATTERNS = [
     re.compile(
+        r"(?P<sy>\d{4})[-/.](?P<sm>\d{1,2})\s*[-–—to]+\s*(?:(?P<ey>\d{4})[-/.](?P<em>\d{1,2})|(?P<ep>Present|Current|Now|Today))",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"(?P<smon>[A-Za-z]{3,9})\s+(?P<syr>\d{4})\s*[-–—to]+\s*(?P<emon>[A-Za-z]{3,9}|Present|Current|Now|Today)\s*(?P<eyr>\d{4})?",
         re.IGNORECASE,
     ),
@@ -630,6 +634,24 @@ def _extract_normalized_dates_from_text(text: str) -> tuple[str | None, str | No
             continue
 
         gd = match.groupdict()
+
+        if gd.get("sy") and gd.get("sm"):
+            s_year = int(gd["sy"])
+            s_month = int(gd["sm"])
+            if not (1 <= s_month <= 12):
+                continue
+            start = f"{s_year:04d}-{s_month:02d}"
+
+            if (gd.get("ep") or "").lower() in PRESENT_WORDS:
+                return start, None, True
+
+            if gd.get("ey") and gd.get("em"):
+                e_year = int(gd["ey"])
+                e_month = int(gd["em"])
+                if not (1 <= e_month <= 12):
+                    continue
+                end = f"{e_year:04d}-{e_month:02d}"
+                return start, end, False
 
         if gd.get("smon") and gd.get("syr"):
             s_month = MONTH_MAP.get(gd["smon"].lower())

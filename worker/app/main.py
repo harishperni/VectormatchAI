@@ -455,12 +455,43 @@ def _merge_llm_fields(parsed: dict[str, Any], llm_parsed: dict[str, Any]) -> dic
             except ValueError:
                 pass
 
-    merged["experience_years_claimed"] = llm_parsed.get("experience_years_claimed")
-    merged["experience_years_calculated"] = llm_parsed.get("experience_years_calculated")
-    merged["experience_years_final"] = llm_parsed.get("experience_years_final")
-    merged["experience_entries"] = llm_parsed.get("experience_entries", merged.get("experience_entries", []))
+    if llm_parsed.get("experience_years_claimed") is not None:
+        merged["experience_years_claimed"] = llm_parsed.get("experience_years_claimed")
+    if llm_parsed.get("experience_years_calculated") is not None:
+        merged["experience_years_calculated"] = llm_parsed.get("experience_years_calculated")
+    if llm_parsed.get("experience_years_final") is not None:
+        merged["experience_years_final"] = llm_parsed.get("experience_years_final")
+    llm_entries = llm_parsed.get("experience_entries")
+    if isinstance(llm_entries, list) and llm_entries:
+        merged["experience_entries"] = llm_entries
 
     return merged
+
+
+def _experience_parse_diagnostics(text: str, parsed: dict[str, Any]) -> dict[str, Any]:
+    entries = parsed.get("experience_entries")
+    if not isinstance(entries, list):
+        entries = []
+
+    with_dates = 0
+    missing_dates = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("start_date") or entry.get("end_date"):
+            with_dates += 1
+        else:
+            missing_dates += 1
+
+    yyyymm_detected = bool(
+        re.search(r"\b\d{4}[-/.]\d{1,2}\s*[-–—]\s*(?:\d{4}[-/.]\d{1,2}|Present|Current|Now)\b", text, re.IGNORECASE)
+    )
+
+    return {
+        "date_format_detected": ["yyyy_mm_range"] if yyyymm_detected else [],
+        "experience_entry_count_with_dates": with_dates,
+        "experience_entry_count_missing_dates": missing_dates,
+    }
 
 
 def mark_resume_failed(resume_id: str, error: str) -> None:
@@ -479,6 +510,7 @@ def mark_resume_failed(resume_id: str, error: str) -> None:
 
 
 def persist_parsed_resume(resume_id: str, text: str, parsed: dict[str, Any]) -> None:
+    diagnostics = _experience_parse_diagnostics(text, parsed)
     with psycopg.connect(WORKER_DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT candidate_id FROM resumes WHERE id = %s::uuid", (resume_id,))
@@ -511,6 +543,7 @@ def persist_parsed_resume(resume_id: str, text: str, parsed: dict[str, Any]) -> 
                             "experience_years_calculated": parsed.get("experience_years_calculated"),
                             "experience_years_final": parsed.get("experience_years_final"),
                             "experience_entries": parsed.get("experience_entries", []),
+                            "parse_diagnostics": diagnostics,
                             "highest_degree": parsed.get("highest_degree"),
                             "sponsorship_required": parsed.get("sponsorship_required"),
                             "distance_miles": parsed.get("distance_miles"),

@@ -2,10 +2,18 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditLog, Candidate, JobResume, Resume
+from app.db.models import (
+    AuditLog,
+    Candidate,
+    JobResume,
+    Ranking,
+    RecruiterAction,
+    Resume,
+    ResumeEmbedding,
+)
 from app.db.session import get_db
 from app.schemas.jobs import JobCreate, JobOut, JobUpdate
 from app.services.ingestion_service import create_resume_entry, save_resume_file
@@ -136,29 +144,21 @@ def ingestion_status_handler(job_id: str, db: Session = Depends(get_db)) -> dict
     if not get_job(db, parsed_id):
         raise HTTPException(status_code=404, detail="Job not found")
 
-    logs = db.execute(
-        select(AuditLog).where(
-            AuditLog.entity_type == "job",
-            AuditLog.entity_id == parsed_id,
-            AuditLog.event_type.in_(
-                ["resume_ingestion_queued", "resume_ingestion_queue_failed"]
-            ),
-        )
-    ).scalars().all()
+    rows = db.execute(
+        select(Resume.parse_status)
+        .join(JobResume, JobResume.resume_id == Resume.id)
+        .where(JobResume.job_id == parsed_id)
+    ).all()
 
-    queued = 0
-    queue_failed = 0
-    for row in logs:
-        if row.event_type == "resume_ingestion_queued":
-            queued += 1
-        elif row.event_type == "resume_ingestion_queue_failed":
-            queue_failed += 1
+    total_uploaded = len(rows)
+    queued = sum(1 for (status,) in rows if status == "pending")
+    queue_failed = sum(1 for (status,) in rows if status == "failed")
 
     return {
         "job_id": job_id,
         "queued": queued,
         "queue_failed": queue_failed,
-        "total_uploaded": len(logs),
+        "total_uploaded": total_uploaded,
     }
 
 
@@ -239,4 +239,84 @@ def job_resume_detail_handler(job_id: str, resume_id: str, db: Session = Depends
         "parsed_json": parsed_json,
         "raw_text": resume.raw_text or "",
         "created_at": resume.created_at.isoformat() if resume.created_at else None,
+    }
+
+
+@router.delete("/{job_id}/resumes/{resume_id}")
+def delete_job_resume_handler(job_id: str, resume_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+        parsed_resume_id = uuid.UUID(resume_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid UUID format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    row = db.execute(
+        select(JobResume, Resume)
+        .join(Resume, Resume.id == JobResume.resume_id)
+        .where(JobResume.job_id == parsed_job_id, JobResume.resume_id == parsed_resume_id)
+        .limit(1)
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Resume not found for job")
+
+    link, resume = row
+    candidate_id = resume.candidate_id
+
+    rankings_deleted = db.execute(
+        delete(Ranking).where(Ranking.job_id == parsed_job_id, Ranking.resume_id == parsed_resume_id)
+    ).rowcount or 0
+    links_deleted = db.execute(
+        delete(JobResume).where(JobResume.job_id == parsed_job_id, JobResume.resume_id == parsed_resume_id)
+    ).rowcount or 0
+
+    resume_deleted = 0
+    candidate_deleted = 0
+
+    remaining_resume_links = db.execute(
+        select(JobResume.id).where(JobResume.resume_id == parsed_resume_id).limit(1)
+    ).first()
+    if not remaining_resume_links:
+        db.execute(delete(ResumeEmbedding).where(ResumeEmbedding.resume_id == parsed_resume_id))
+        db.execute(delete(Ranking).where(Ranking.resume_id == parsed_resume_id))
+        resume_deleted = db.execute(delete(Resume).where(Resume.id == parsed_resume_id)).rowcount or 0
+
+        has_other_resumes = db.execute(
+            select(Resume.id).where(Resume.candidate_id == candidate_id).limit(1)
+        ).first()
+        if not has_other_resumes:
+            db.execute(delete(RecruiterAction).where(RecruiterAction.candidate_id == candidate_id))
+            candidate_deleted = db.execute(
+                delete(Candidate).where(Candidate.id == candidate_id)
+            ).rowcount or 0
+
+    db.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            entity_type="job",
+            entity_id=parsed_job_id,
+            event_type="resume_deleted",
+            payload={
+                "resume_id": str(parsed_resume_id),
+                "candidate_id": str(candidate_id),
+                "links_deleted": links_deleted,
+                "rankings_deleted": rankings_deleted,
+                "resume_deleted": resume_deleted,
+                "candidate_deleted": candidate_deleted,
+            },
+        )
+    )
+
+    db.commit()
+
+    return {
+        "job_id": job_id,
+        "resume_id": resume_id,
+        "status": "deleted",
+        "links_deleted": links_deleted,
+        "rankings_deleted": rankings_deleted,
+        "resume_deleted": resume_deleted,
+        "candidate_deleted": candidate_deleted,
     }

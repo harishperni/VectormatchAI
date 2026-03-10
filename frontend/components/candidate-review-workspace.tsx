@@ -253,7 +253,20 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                   </td>
                     <td className="px-3 py-2 font-semibold text-slate-900">{row.score}%</td>
                     <td className="px-3 py-2 text-xs text-slate-700">
-                      {row.audit_flags?.length ? row.audit_flags.join(" | ") : "OK"}
+                      <div className="max-w-[260px] space-y-1">
+                        <p className="font-medium text-slate-800">
+                          {row.audit_summary ?? (row.audit_flags?.length ? row.audit_flags[0] : "OK")}
+                        </p>
+                        {row.audit_detail?.length ? (
+                          <p className="line-clamp-2 text-[11px] leading-4 text-slate-500">
+                            {row.audit_detail.join(" | ")}
+                          </p>
+                        ) : row.audit_flags?.length ? (
+                          <p className="line-clamp-2 text-[11px] leading-4 text-slate-500">
+                            {row.audit_flags.join(" | ")}
+                          </p>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                       <div className="flex flex-wrap gap-1">

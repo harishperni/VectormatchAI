@@ -19,6 +19,8 @@ class RankingRow(BaseModel):
     top_reasons: list[str]
     action_status: str | None = None
     audit_flags: list[str] = Field(default_factory=list)
+    audit_summary: str | None = None
+    audit_detail: list[str] = Field(default_factory=list)
 
 
 class RankingListResponse(BaseModel):

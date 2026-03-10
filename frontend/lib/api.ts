@@ -27,6 +27,8 @@ export type RankingRow = {
   top_reasons: string[];
   action_status?: string | null;
   audit_flags?: string[];
+  audit_summary?: string | null;
+  audit_detail?: string[];
 };
 
 export type EvaluationDiffRow = {

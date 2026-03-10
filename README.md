@@ -103,6 +103,16 @@
 - GPT parse now extracts `current_last_job` and prefers GPT `experience_years`
   while excluding education duration from work experience.
 
+## Resume extraction pipeline
+- Text extraction order:
+  - `PyMuPDF` for PDF
+  - `python-docx` for DOCX
+  - `Unstructured` fallback when extracted text looks weak
+- Parsed JSON enrichment:
+  - heuristic parse
+  - GPT parse
+  - GPT normalization pass over raw text + preliminary JSON
+
 ## Distance filter behavior
 - Distance is computed between `jobs.location` and candidate location extracted from resume text.
 - Geocoding uses OpenStreetMap Nominatim at ranking/filter time with local in-process cache.

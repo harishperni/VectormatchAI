@@ -20,6 +20,7 @@ export default function JobWorkspace({
   resumes: ParsedResumeRow[];
 }) {
   const [localRankings, setLocalRankings] = useState<RankingRow[]>(rankings);
+  const [localResumes, setLocalResumes] = useState<ParsedResumeRow[]>(resumes);
   const [showPipeline, setShowPipeline] = useState(false);
   const storageKey = `ats:job:${jobId}:showKanban`;
   const [refreshing, setRefreshing] = useState(false);
@@ -40,6 +41,10 @@ export default function JobWorkspace({
     setLocalRankings(rankings);
   }, [rankings]);
 
+  useEffect(() => {
+    setLocalResumes(resumes);
+  }, [resumes]);
+
   async function refreshRankings() {
     setRefreshing(true);
     try {
@@ -54,6 +59,25 @@ export default function JobWorkspace({
     } finally {
       setRefreshing(false);
     }
+  }
+
+  async function refreshResumes() {
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/resumes`, { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const payload = await response.json();
+      if (payload?.items) {
+        setLocalResumes(payload.items);
+      }
+    } catch {
+      // ignore refresh failures
+    }
+  }
+
+  async function refreshWorkspace() {
+    await Promise.all([refreshRankings(), refreshResumes()]);
   }
 
   useEffect(() => {
@@ -101,7 +125,7 @@ export default function JobWorkspace({
             {showPipeline ? "Hide Kanban" : "Show Kanban"}
           </button>
           <button
-            onClick={refreshRankings}
+            onClick={refreshWorkspace}
             disabled={refreshing}
             className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
           >
@@ -133,8 +157,8 @@ export default function JobWorkspace({
         />
       ) : (
         <>
-          <CandidateReviewWorkspace jobId={jobId} rows={localRankings} resumes={resumes} />
-          <ParsedResumesTable jobId={jobId} rows={resumes} />
+          <CandidateReviewWorkspace jobId={jobId} rows={localRankings} resumes={localResumes} />
+          <ParsedResumesTable jobId={jobId} rows={localResumes} onDeleted={refreshWorkspace} />
         </>
       )}
     </div>

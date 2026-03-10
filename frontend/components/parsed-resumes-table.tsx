@@ -7,6 +7,7 @@ import { type ParsedResumeRow } from "@/lib/api";
 type Props = {
   jobId: string;
   rows: ParsedResumeRow[];
+  onDeleted?: () => Promise<void> | void;
 };
 
 type ResumeDetail = {
@@ -25,10 +26,12 @@ function statusClass(status: ParsedResumeRow["parse_status"]): string {
   return "bg-amber-50 text-amber-700 border-amber-200";
 }
 
-export default function ParsedResumesTable({ jobId, rows }: Props) {
+export default function ParsedResumesTable({ jobId, rows, onDeleted }: Props) {
   const [selected, setSelected] = useState<ResumeDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deletingResumeId, setDeletingResumeId] = useState<string | null>(null);
+  const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
 
   async function openParsedResume(resumeId: string) {
     setLoading(true);
@@ -48,6 +51,33 @@ export default function ParsedResumesTable({ jobId, rows }: Props) {
       setError("Could not load parsed resume details.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function deleteResume(resumeId: string) {
+    const proceed = window.confirm("Delete this resume from the job?");
+    if (!proceed) return;
+
+    setDeletingResumeId(resumeId);
+    setDeleteMessage(null);
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/resumes/${resumeId}`, {
+        method: "DELETE",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setDeleteMessage(payload?.detail ?? "Could not delete resume.");
+        return;
+      }
+      setDeleteMessage("Resume deleted.");
+      if (selected?.resume_id === resumeId) {
+        setSelected(null);
+      }
+      await onDeleted?.();
+    } catch {
+      setDeleteMessage("Could not delete resume.");
+    } finally {
+      setDeletingResumeId(null);
     }
   }
 
@@ -78,7 +108,7 @@ export default function ParsedResumesTable({ jobId, rows }: Props) {
                 <th className="py-2 pr-3">Experience</th>
                 <th className="py-2 pr-3">Skills</th>
                 <th className="py-2 pr-3">Parse Error</th>
-                <th className="py-2">Parsed View</th>
+                <th className="py-2">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -102,12 +132,21 @@ export default function ParsedResumesTable({ jobId, rows }: Props) {
                   </td>
                   <td className="py-2 pr-3 text-rose-700">{row.parse_error ?? "-"}</td>
                   <td className="py-2">
-                    <button
-                      onClick={() => openParsedResume(row.resume_id)}
-                      className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700"
-                    >
-                      View Parsed
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => openParsedResume(row.resume_id)}
+                        className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700"
+                      >
+                        View Parsed
+                      </button>
+                      <button
+                        onClick={() => deleteResume(row.resume_id)}
+                        disabled={deletingResumeId === row.resume_id}
+                        className="rounded border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700 disabled:opacity-60"
+                      >
+                        {deletingResumeId === row.resume_id ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -116,6 +155,9 @@ export default function ParsedResumesTable({ jobId, rows }: Props) {
         </div>
       ) : null}
 
+      {deleteMessage ? (
+        <p className="mt-3 rounded border border-slate-200 bg-slate-50 p-2 text-sm text-slate-700">{deleteMessage}</p>
+      ) : null}
       {loading ? <p className="mt-3 text-sm text-slate-600">Loading parsed resume...</p> : null}
       {error ? (
         <p className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">{error}</p>

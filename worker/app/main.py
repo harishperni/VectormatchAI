@@ -14,13 +14,22 @@ import redis
 from docx import Document
 from psycopg.types.json import Json
 
-from app.llm_parse import normalize_resume_fields_with_llm, parse_resume_with_llm
+from app.llm_parse import (
+    _build_experience_calculation,
+    _extract_work_excerpt,
+    extract_experience_entries_from_blocks,
+    parse_resume_with_llm,
+    reconcile_resume_parse_with_llm,
+)
+# Legacy fallback import:
+# from app.llm_parse import normalize_resume_fields_with_llm, parse_resume_with_llm
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 INGESTION_QUEUE_KEY = os.getenv("INGESTION_QUEUE_KEY", "resume_ingestion_queue")
 WORKER_DATABASE_URL = os.getenv("WORKER_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/ats")
 ENABLE_LLM_PARSE = os.getenv("ENABLE_LLM_PARSE", "false").lower() == "true"
 LLM_PARSE_ONLY = os.getenv("LLM_PARSE_ONLY", "false").lower() == "true"
+USE_DOCLING_PARSER = os.getenv("USE_DOCLING_PARSER", "true").lower() == "true"
 
 SKILL_KEYWORDS = [
     "python",
@@ -46,7 +55,7 @@ PHONE_PATTERN = re.compile(r"(?:\+?\d[\d\s().-]{8,}\d)")
 YEARS_OF_EXPERIENCE_PATTERN = re.compile(
     r"(?:(?:over|more\s+than|approximately|around|nearly)\s+)?"
     r"(?P<years>\d{1,2}(?:\.\d+)?)\s*\+?\s*"
-    r"(?:years?|yrs?)\s+(?:of\s+)?(?:professional\s+|relevant\s+|overall\s+)?experience\b",
+    r"(?:years?|yrs?)\s+(?:of\s+)?(?:\w+\s+){0,3}?experience\b",
     re.IGNORECASE,
 )
 NO_SPONSOR_PATTERN = re.compile(r"(no\s+sponsorship|without\s+sponsorship)", re.IGNORECASE)
@@ -126,6 +135,20 @@ def _month_index(year: int, month: int) -> int:
     return (year * 12) + month
 
 
+def _merge_month_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if not intervals:
+        return []
+    ordered = sorted(intervals, key=lambda item: item[0])
+    merged = [ordered[0]]
+    for start_idx, end_idx in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start_idx <= last_end:
+            merged[-1] = (last_start, max(last_end, end_idx))
+        else:
+            merged.append((start_idx, end_idx))
+    return merged
+
+
 def _parse_end_year(value: str) -> int:
     if value.lower() in {"present", "current", "now"}:
         return datetime.now(UTC).year
@@ -138,9 +161,10 @@ def _extract_explicit_experience_years_claim(text: str) -> float | None:
     values: list[float] = []
     for line in search_lines:
         lowered = line.lower()
-        if any(noise in lowered for noise in EXPLICIT_CLAIM_NOISE_WORDS):
+        matches = list(YEARS_OF_EXPERIENCE_PATTERN.finditer(line))
+        if not matches and any(noise in lowered for noise in EXPLICIT_CLAIM_NOISE_WORDS):
             continue
-        for match in YEARS_OF_EXPERIENCE_PATTERN.finditer(line):
+        for match in matches:
             try:
                 values.append(float(match.group("years")))
             except ValueError:
@@ -171,7 +195,7 @@ def _extract_experience_years(text: str) -> tuple[float | None, str]:
 
     source_text = "\n".join(work_lines) if work_lines else text
 
-    total_months = 0
+    intervals: list[tuple[int, int]] = []
     for match in MONTH_YEAR_RANGE_PATTERN.findall(source_text):
         start_month_txt, start_year_txt, end_month_or_word, end_year_txt = match
         start_month = MONTH_MAP.get(start_month_txt.lower())
@@ -191,7 +215,7 @@ def _extract_experience_years(text: str) -> tuple[float | None, str]:
         start_idx = _month_index(start_year, start_month)
         end_idx = _month_index(end_year, end_month)
         if end_idx >= start_idx:
-            total_months += (end_idx - start_idx) + 1
+            intervals.append((start_idx, end_idx))
 
     for match in YEAR_RANGE_PATTERN.findall(source_text):
         start_year_txt, end_year_txt = match
@@ -200,8 +224,10 @@ def _extract_experience_years(text: str) -> tuple[float | None, str]:
         start_idx = _month_index(start_year, 1)
         end_idx = _month_index(end_year, 12)
         if end_idx >= start_idx:
-            total_months += (end_idx - start_idx) + 1
+            intervals.append((start_idx, end_idx))
 
+    merged = _merge_month_intervals(intervals)
+    total_months = sum((end - start) + 1 for start, end in merged)
     inferred_years = round(total_months / 12.0, 1) if total_months > 0 else None
     # Guardrail: reject suspiciously high explicit claims when date-derived value exists.
     if explicit_years is not None and inferred_years is not None:
@@ -270,8 +296,8 @@ def _extract_candidate_location_from_top(
             if normalized:
                 return normalized
 
-    # 3) Generic city/state match in top section.
-    for line in top_lines:
+    # 3) Generic city/state match only in likely header lines.
+    for line in top_lines[:8]:
         match = LOCATION_LINE_PATTERN.search(line)
         if match:
             normalized = _normalize_us_location(match.group(1))
@@ -322,7 +348,35 @@ def _extract_with_unstructured(path: Path) -> str | None:
         return None
 
 
-def parse_text_from_file(path: Path) -> str:
+def _extract_with_docling(path: Path) -> str | None:
+    try:
+        from docling.document_converter import DocumentConverter
+    except Exception:
+        return None
+
+    try:
+        converter = DocumentConverter()
+        result = converter.convert(str(path))
+        document = getattr(result, "document", None)
+        if document is None:
+            return None
+
+        if hasattr(document, "export_to_text"):
+            text = document.export_to_text()
+            if isinstance(text, str) and text.strip():
+                return text
+
+        if hasattr(document, "export_to_markdown"):
+            markdown = document.export_to_markdown()
+            if isinstance(markdown, str) and markdown.strip():
+                return markdown
+    except Exception:
+        return None
+
+    return None
+
+
+def _parse_text_from_file_legacy(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         doc = fitz.open(path)
@@ -351,6 +405,17 @@ def parse_text_from_file(path: Path) -> str:
     return text
 
 
+def parse_text_from_file(path: Path) -> str:
+    # New primary parser: docling (when installed and enabled).
+    if USE_DOCLING_PARSER and path.suffix.lower() in {".pdf", ".docx"}:
+        docling_text = _extract_with_docling(path)
+        if isinstance(docling_text, str) and docling_text.strip() and not _text_looks_weak(docling_text):
+            return docling_text
+
+    # Legacy parser backup (previous implementation).
+    return _parse_text_from_file_legacy(path)
+
+
 def extract_resume_features(text: str) -> dict[str, Any]:
     text_lower = text.lower()
     skills = [skill for skill in SKILL_KEYWORDS if skill in text_lower]
@@ -359,6 +424,21 @@ def extract_resume_features(text: str) -> dict[str, Any]:
 
     # Heuristic only as fallback
     experience_years, experience_source = _extract_experience_years(text)
+    work_excerpt = _extract_work_excerpt(text)
+    experience_entries = extract_experience_entries_from_blocks(work_excerpt)
+    experience_calculation = _build_experience_calculation(experience_entries)
+    current_last_job = None
+    if experience_entries:
+        current_last_job = experience_entries[0].get("title")
+
+    calculated_years = experience_calculation.get("total_years")
+    if isinstance(calculated_years, (int, float)):
+        experience_years = round(float(calculated_years), 1)
+        experience_source = "python_from_experience_entries"
+    elif experience_source == "inferred_from_dates":
+        # Raw date fallback is too noisy without structured role extraction.
+        experience_years = None
+        experience_source = "unreliable_raw_date_fallback"
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     candidate_location = _extract_candidate_location_from_top(
@@ -392,14 +472,15 @@ def extract_resume_features(text: str) -> dict[str, Any]:
         "experience_years": experience_years,
         "experience_source": experience_source,
         "experience_years_claimed": None,
-        "experience_years_calculated": None,
+        "experience_years_calculated": calculated_years,
         "experience_years_final": None,
-        "experience_entries": [],
+        "experience_entries": experience_entries,
+        "experience_calculation": experience_calculation,
         "highest_degree": highest_degree,
         "sponsorship_required": sponsorship_required,
         "distance_miles": None,
         "candidate_location": candidate_location,
-        "current_last_job": None,
+        "current_last_job": current_last_job,
     }
 
 
@@ -412,6 +493,8 @@ def _parse_quality_is_weak(parsed: dict[str, Any]) -> bool:
 
 def _merge_llm_fields(parsed: dict[str, Any], llm_parsed: dict[str, Any]) -> dict[str, Any]:
     merged = dict(parsed)
+    def _missing(value: Any) -> bool:
+        return value is None or (isinstance(value, str) and not value.strip())
 
     for key in (
         "email",
@@ -420,7 +503,7 @@ def _merge_llm_fields(parsed: dict[str, Any], llm_parsed: dict[str, Any]) -> dic
         "current_last_job",
         "sponsorship_required",
     ):
-        if llm_parsed.get(key):
+        if _missing(merged.get(key)) and not _missing(llm_parsed.get(key)):
             merged[key] = llm_parsed.get(key)
 
     # Python location is preferred for consistency; only fallback to LLM when missing.
@@ -438,11 +521,15 @@ def _merge_llm_fields(parsed: dict[str, Any], llm_parsed: dict[str, Any]) -> dic
     llm_calc = llm_parsed.get("experience_years_calculated")
     llm_plain = llm_parsed.get("experience_years")
 
+    current_experience = merged.get("experience_years")
     for value, source in (
         (llm_final, llm_parsed.get("experience_source")),
         (llm_calc, "python_from_experience_entries"),
         (llm_plain, llm_parsed.get("experience_source")),
     ):
+        if value is llm_plain and current_experience is not None:
+            # Do not let weak/free-form LLM guess override an existing numeric value.
+            continue
         if isinstance(value, (int, float)):
             merged["experience_years"] = round(float(value), 1)
             merged["experience_source"] = source or "llm_preferred"
@@ -468,20 +555,69 @@ def _merge_llm_fields(parsed: dict[str, Any], llm_parsed: dict[str, Any]) -> dic
     return merged
 
 
-def _experience_parse_diagnostics(text: str, parsed: dict[str, Any]) -> dict[str, Any]:
-    entries = parsed.get("experience_entries")
-    if not isinstance(entries, list):
-        entries = []
+def _finalize_llm_primary_parse(text: str, llm_parsed: dict[str, Any], python_parsed: dict[str, Any]) -> dict[str, Any]:
+    finalized = dict(llm_parsed)
 
-    with_dates = 0
-    missing_dates = 0
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("start_date") or entry.get("end_date"):
-            with_dates += 1
-        else:
-            missing_dates += 1
+    for key in ("email", "phone", "highest_degree", "candidate_location", "current_last_job", "sponsorship_required"):
+        if finalized.get(key) is None and python_parsed.get(key) is not None:
+            finalized[key] = python_parsed.get(key)
+
+    if not finalized.get("skills") and python_parsed.get("skills"):
+        finalized["skills"] = python_parsed.get("skills", [])
+
+    if not finalized.get("experience_entries") and python_parsed.get("experience_entries"):
+        finalized["experience_entries"] = python_parsed.get("experience_entries", [])
+
+    if finalized.get("experience_entries"):
+        experience_calculation = _build_experience_calculation(finalized["experience_entries"])
+        finalized["experience_calculation"] = experience_calculation
+        calculated_years = experience_calculation.get("total_years")
+        finalized["experience_years_calculated"] = calculated_years
+        if finalized.get("current_last_job") is None and finalized["experience_entries"]:
+            finalized["current_last_job"] = finalized["experience_entries"][0].get("title")
+    else:
+        finalized["experience_calculation"] = python_parsed.get("experience_calculation")
+        finalized["experience_years_calculated"] = python_parsed.get("experience_years_calculated")
+
+    if finalized.get("experience_years_claimed") is None:
+        finalized["experience_years_claimed"] = python_parsed.get("experience_years_claimed")
+
+    if finalized.get("experience_years_claimed") is not None:
+        finalized["experience_years"] = finalized["experience_years_claimed"]
+        finalized["experience_years_final"] = finalized["experience_years_claimed"]
+        finalized["experience_source"] = "explicit_claim_from_summary"
+    elif finalized.get("experience_years_calculated") is not None:
+        finalized["experience_years"] = finalized["experience_years_calculated"]
+        finalized["experience_years_final"] = finalized["experience_years_calculated"]
+        finalized["experience_source"] = "python_from_experience_entries"
+    else:
+        finalized["experience_years"] = python_parsed.get("experience_years")
+        finalized["experience_years_final"] = python_parsed.get("experience_years_final")
+        finalized["experience_source"] = python_parsed.get("experience_source")
+
+    return finalized
+
+
+def _experience_parse_diagnostics(text: str, parsed: dict[str, Any]) -> dict[str, Any]:
+    calculation = parsed.get("experience_calculation")
+    if isinstance(calculation, dict) and isinstance(calculation.get("roles"), list):
+        roles = calculation["roles"]
+        with_dates = sum(1 for role in roles if role.get("start_date") or role.get("end_date"))
+        missing_dates = sum(1 for role in roles if not role.get("start_date") and not role.get("end_date"))
+    else:
+        entries = parsed.get("experience_entries")
+        if not isinstance(entries, list):
+            entries = []
+
+        with_dates = 0
+        missing_dates = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("start_date") or entry.get("end_date"):
+                with_dates += 1
+            else:
+                missing_dates += 1
 
     yyyymm_detected = bool(
         re.search(r"\b\d{4}[-/.]\d{1,2}\s*[-–—]\s*(?:\d{4}[-/.]\d{1,2}|Present|Current|Now)\b", text, re.IGNORECASE)
@@ -543,6 +679,7 @@ def persist_parsed_resume(resume_id: str, text: str, parsed: dict[str, Any]) -> 
                             "experience_years_calculated": parsed.get("experience_years_calculated"),
                             "experience_years_final": parsed.get("experience_years_final"),
                             "experience_entries": parsed.get("experience_entries", []),
+                            "experience_calculation": parsed.get("experience_calculation"),
                             "parse_diagnostics": diagnostics,
                             "highest_degree": parsed.get("highest_degree"),
                             "sponsorship_required": parsed.get("sponsorship_required"),
@@ -611,40 +748,28 @@ def run_ingestion_worker() -> None:
             if not text.strip():
                 raise ValueError("No extractable text found in resume")
 
-            parsed = extract_resume_features(text)
+            python_parsed = extract_resume_features(text)
+            parsed = dict(python_parsed)
 
             if ENABLE_LLM_PARSE:
                 llm_parsed = parse_resume_with_llm(text)
                 if llm_parsed:
-                    if LLM_PARSE_ONLY:
-                        parsed = _merge_llm_fields(
-                            {
-                                "email": None,
-                                "phone": None,
-                                "skills": [],
-                                "experience_years": None,
-                                "experience_source": "llm_only",
-                                "experience_years_claimed": None,
-                                "experience_years_calculated": None,
-                                "experience_years_final": None,
-                                "experience_entries": [],
-                                "highest_degree": None,
-                                "sponsorship_required": None,
-                                "distance_miles": None,
-                                "candidate_location": None,
-                                "current_last_job": None,
-                            },
-                            llm_parsed,
-                        )
-                        parsed["experience_source"] = llm_parsed.get("experience_source", "llm_only")
-                    elif _parse_quality_is_weak(parsed):
-                        parsed = _merge_llm_fields(parsed, llm_parsed)
-                    else:
-                        parsed = _merge_llm_fields(parsed, llm_parsed)
-
-                    normalized = normalize_resume_fields_with_llm(text, parsed)
-                    if normalized:
-                        parsed = _merge_llm_fields(parsed, normalized)
+                    reconciled = reconcile_resume_parse_with_llm(
+                        text,
+                        llm_parsed=llm_parsed,
+                        python_parsed=python_parsed,
+                    )
+                    parsed = _finalize_llm_primary_parse(text, reconciled or llm_parsed, python_parsed)
+                    # Legacy hybrid flow kept for fallback:
+                    # if LLM_PARSE_ONLY:
+                    #     parsed = _merge_llm_fields({...}, llm_parsed)
+                    # else:
+                    #     parsed = _merge_llm_fields(parsed, llm_parsed)
+                    # normalized = normalize_resume_fields_with_llm(text, parsed)
+                    # if normalized:
+                    #     parsed = _merge_llm_fields(parsed, normalized)
+                else:
+                    parsed = python_parsed
 
             print("==== FINAL PARSED BEFORE SAVE ====")
             print(json.dumps(parsed, indent=2, default=str))

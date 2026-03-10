@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import uuid
@@ -19,7 +21,7 @@ from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_
 from app.services.location_service import distance_miles_between
 from app.services.scoring import weighted_score
 
-SCORING_VERSION = "score_v2_gpt_only"
+SCORING_VERSION = "score_v3_embedding_semantic_gpt_only"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "false").lower() == "true"
@@ -155,6 +157,45 @@ def _explainability_audit_flags(
     return flags
 
 
+def _build_audit_summary(
+    *,
+    matched_skills: list[str],
+    missing_skills: list[str],
+    top_reasons: list[str],
+    audit_flags: list[str],
+) -> str:
+    if audit_flags:
+        return audit_flags[0]
+    if matched_skills and missing_skills:
+        return f"Matched {', '.join(matched_skills[:2])}; missing {', '.join(missing_skills[:2])}"
+    if matched_skills:
+        return f"Matched {', '.join(matched_skills[:3])}"
+    if missing_skills:
+        return f"Missing {', '.join(missing_skills[:3])}"
+    if top_reasons:
+        return str(top_reasons[0])
+    return "Limited evidence"
+
+
+def _build_audit_detail(
+    *,
+    matched_skills: list[str],
+    missing_skills: list[str],
+    top_reasons: list[str],
+    summary: str | None,
+) -> list[str]:
+    detail: list[str] = []
+    if matched_skills:
+        detail.append(f"Matches: {', '.join(matched_skills[:4])}")
+    if missing_skills:
+        detail.append(f"Gaps: {', '.join(missing_skills[:4])}")
+    if top_reasons:
+        detail.extend(str(item) for item in top_reasons[:2])
+    if summary and not detail:
+        detail.append(summary.strip())
+    return detail[:3]
+
+
 def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputation:
     resume_text = resume.raw_text or ""
     resume_skills = [str(skill) for skill in (resume.skills_json or [])]
@@ -190,9 +231,63 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
     )
 
 
-def run_ranking_for_job(db: Session, job: Job) -> int:
-    db.execute(delete(Ranking).where(Ranking.job_id == job.id))
+def _stable_hash(payload: dict) -> str:
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+
+def _job_signature(job: Job) -> str:
+    return _stable_hash(
+        {
+            "title": job.title or "",
+            "description": job.description or "",
+            "required_skills": job.required_skills or [],
+            "nice_to_have_skills": job.nice_to_have_skills or [],
+            "min_experience_years": float(job.min_experience_years) if job.min_experience_years is not None else None,
+            "domain_tags": job.domain_tags or [],
+            "reasoning_model": OPENAI_REASONING_MODEL,
+            "scoring_version": SCORING_VERSION,
+            "gpt_only_ranking": GPT_ONLY_RANKING,
+            "enable_llm_scoring": ENABLE_LLM_SCORING,
+            "llm_score_weight": LLM_SCORE_WEIGHT,
+            "llm_confidence_weight": LLM_CONFIDENCE_WEIGHT,
+        }
+    )
+
+
+def _resume_signature(resume: Resume) -> str:
+    return _stable_hash(
+        {
+            "raw_text": resume.raw_text or "",
+            "skills_json": resume.skills_json if isinstance(resume.skills_json, list) else [],
+            "experience_years": float(resume.experience_years) if resume.experience_years is not None else None,
+            "parse_status": resume.parse_status or "",
+            "parsed_json": resume.parsed_json if isinstance(resume.parsed_json, dict) else {},
+        }
+    )
+
+
+def _ranking_is_fresh(
+    ranking: Ranking | None,
+    *,
+    expected_job_sig: str,
+    expected_resume_sig: str,
+) -> bool:
+    if not ranking:
+        return False
+    payload = ranking.explanation_json if isinstance(ranking.explanation_json, dict) else {}
+    if payload.get("job_signature") != expected_job_sig:
+        return False
+    if payload.get("resume_signature") != expected_resume_sig:
+        return False
+    if payload.get("reasoning_model") != OPENAI_REASONING_MODEL:
+        return False
+    if payload.get("scoring_version") != SCORING_VERSION:
+        return False
+    return True
+
+
+def run_ranking_for_job(db: Session, job: Job) -> int:
     resumes = (
         db.execute(
             select(Resume)
@@ -208,11 +303,65 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         .all()
     )
     processed = 0
+    job_sig = _job_signature(job)
+    resume_ids = [resume.id for resume in resumes]
+
+    existing_rankings = (
+        db.execute(
+            select(Ranking).where(
+                Ranking.job_id == job.id,
+                Ranking.scoring_version == SCORING_VERSION,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    existing_by_resume_id: dict[uuid.UUID, Ranking] = {
+        row.resume_id: row for row in existing_rankings if row.resume_id is not None
+    }
+
+    # Clean stale rankings for resumes no longer in parsed set.
+    if resume_ids:
+        db.execute(
+            delete(Ranking).where(
+                Ranking.job_id == job.id,
+                Ranking.scoring_version == SCORING_VERSION,
+                Ranking.resume_id.not_in(resume_ids),
+            )
+        )
+    else:
+        db.execute(
+            delete(Ranking).where(
+                Ranking.job_id == job.id,
+                Ranking.scoring_version == SCORING_VERSION,
+            )
+        )
 
     pending_rows: list[tuple[Resume, RankingComputation, dict]] = []
+    job_embedding_vector: list[float] | None = None
+    try:
+        job_embedding_vector = get_or_create_job_embedding(db, job).embedding
+    except Exception:
+        job_embedding_vector = None
+
     for resume in resumes:
-        # Keep heuristic baseline only as LLM context/fallback.
+        resume_sig = _resume_signature(resume)
+        existing = existing_by_resume_id.get(resume.id)
+        if _ranking_is_fresh(existing, expected_job_sig=job_sig, expected_resume_sig=resume_sig):
+            continue
+
+        semantic_source = "token_overlap_fallback"
         semantic = _semantic_score_fallback(job.description or "", resume.raw_text or "")
+        if job_embedding_vector:
+            try:
+                resume_embedding = get_or_create_resume_embedding(db, resume)
+                embedding_score = cosine_similarity_percent(job_embedding_vector, resume_embedding.embedding)
+                semantic = embedding_score
+                semantic_source = "embedding_cosine"
+            except Exception:
+                semantic = _semantic_score_fallback(job.description or "", resume.raw_text or "")
+                semantic_source = "token_overlap_fallback"
+
         result = compute_ranking(job, resume, semantic)
         explanation_json: dict = {
             "score_breakdown": {
@@ -221,6 +370,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "experience": result.experience,
                 "domain": result.domain,
             },
+            "semantic_source": semantic_source,
             "base_score": result.final,
             "base_confidence": result.confidence,
             "matched_skills": result.matched_skills,
@@ -241,6 +391,8 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             "llm_confidence": None,
             "final_score": result.final,
             "final_confidence": result.confidence,
+            "job_signature": job_sig,
+            "resume_signature": resume_sig,
         }
         pending_rows.append((resume, result, explanation_json))
 
@@ -327,14 +479,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         explanation_json["reasoning_model"] = OPENAI_REASONING_MODEL
 
     for resume, result, explanation_json in pending_rows:
-        existing = db.execute(
-            select(Ranking).where(
-                Ranking.job_id == job.id,
-                Ranking.candidate_id == resume.candidate_id,
-                Ranking.resume_id == resume.id,
-                Ranking.scoring_version == SCORING_VERSION,
-            )
-        ).scalar_one_or_none()
+        existing = existing_by_resume_id.get(resume.id)
 
         if existing:
             existing.score = result.final
@@ -427,7 +572,11 @@ def get_rankings_for_job(
             & (JobResume.candidate_id == Ranking.candidate_id)
             & (JobResume.resume_id == Ranking.resume_id),
         )
-        .where(Ranking.job_id == job_id, JobResume.job_id == job_id)
+        .where(
+            Ranking.job_id == job_id,
+            JobResume.job_id == job_id,
+            Ranking.scoring_version == SCORING_VERSION,
+        )
         .order_by(desc(Ranking.score))
     ).all()
 
@@ -447,6 +596,12 @@ def get_rankings_for_job(
         payload = ranking.explanation_json if isinstance(ranking.explanation_json, dict) else {}
         parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
         reasons = payload.get("top_reasons", [])
+        matched_skills = payload.get("matched_skills", [])
+        if not isinstance(matched_skills, list):
+            matched_skills = []
+        missing_skills = payload.get("missing_skills", [])
+        if not isinstance(missing_skills, list):
+            missing_skills = []
         resume_skills = [
             str(item).lower()
             for item in (resume.skills_json if isinstance(resume.skills_json, list) else [])
@@ -517,6 +672,15 @@ def get_rankings_for_job(
             elif status_l not in {parse_status, action_status}:
                 continue
 
+        audit_flags = _explainability_audit_flags(
+            score=score,
+            confidence=float(ranking.confidence),
+            score_breakdown=payload.get("score_breakdown", {})
+            if isinstance(payload.get("score_breakdown", {}), dict)
+            else {},
+            matched_skills=matched_skills,
+            missing_skills=missing_skills,
+        )
         output.append(
             {
                 "candidate_id": str(ranking.candidate_id),
@@ -537,18 +701,18 @@ def get_rankings_for_job(
                 "sponsorship_required": sponsorship if isinstance(sponsorship, bool) else None,
                 "top_reasons": reasons[:3] if isinstance(reasons, list) else [],
                 "action_status": candidate_action,
-                "audit_flags": _explainability_audit_flags(
-                    score=score,
-                    confidence=float(ranking.confidence),
-                    score_breakdown=payload.get("score_breakdown", {})
-                    if isinstance(payload.get("score_breakdown", {}), dict)
-                    else {},
-                    matched_skills=payload.get("matched_skills", [])
-                    if isinstance(payload.get("matched_skills", []), list)
-                    else [],
-                    missing_skills=payload.get("missing_skills", [])
-                    if isinstance(payload.get("missing_skills", []), list)
-                    else [],
+                "audit_flags": audit_flags,
+                "audit_summary": _build_audit_summary(
+                    matched_skills=matched_skills,
+                    missing_skills=missing_skills,
+                    top_reasons=reasons if isinstance(reasons, list) else [],
+                    audit_flags=audit_flags,
+                ),
+                "audit_detail": _build_audit_detail(
+                    matched_skills=matched_skills,
+                    missing_skills=missing_skills,
+                    top_reasons=reasons if isinstance(reasons, list) else [],
+                    summary=payload.get("summary") if isinstance(payload.get("summary"), str) else None,
                 ),
             }
         )
@@ -566,7 +730,11 @@ def get_candidate_explanation(
             & (JobResume.candidate_id == Ranking.candidate_id)
             & (JobResume.resume_id == Ranking.resume_id),
         )
-        .where(Ranking.job_id == job_id, Ranking.candidate_id == candidate_id)
+        .where(
+            Ranking.job_id == job_id,
+            Ranking.candidate_id == candidate_id,
+            Ranking.scoring_version == SCORING_VERSION,
+        )
         .order_by(desc(Ranking.score), desc(Ranking.created_at))
     ).scalar_one_or_none()
     if not ranking:

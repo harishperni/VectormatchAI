@@ -58,6 +58,12 @@ YEARS_OF_EXPERIENCE_PATTERN = re.compile(
     r"(?:years?|yrs?)\s+(?:of\s+)?(?:\w+\s+){0,3}?experience\b",
     re.IGNORECASE,
 )
+ALT_YEARS_OF_EXPERIENCE_PATTERN = re.compile(
+    r"(?:for\s+)?(?:more\s+than|over|around|approximately|nearly)?\s*"
+    r"(?P<years>\d{1,2}(?:\.\d+)?)\s*\+?\s*"
+    r"(?:years?|yrs?)\b",
+    re.IGNORECASE,
+)
 NO_SPONSOR_PATTERN = re.compile(r"(no\s+sponsorship|without\s+sponsorship)", re.IGNORECASE)
 YES_SPONSOR_PATTERN = re.compile(r"(require[s]?\s+sponsorship|visa\s+sponsorship)", re.IGNORECASE)
 LOCATION_LINE_PATTERN = re.compile(
@@ -76,6 +82,10 @@ YEAR_RANGE_PATTERN = re.compile(
 )
 SECTION_HEADER_PATTERN = re.compile(
     r"^\s*(work experience|professional experience|experience|education)\s*:?\s*$",
+    re.IGNORECASE,
+)
+SUMMARY_HEADER_PATTERN = re.compile(
+    r"^\s*(summary|professional summary|profile|about me|career summary)\s*:?\s*$",
     re.IGNORECASE,
 )
 
@@ -162,6 +172,12 @@ def _extract_explicit_experience_years_claim(text: str) -> float | None:
     for line in search_lines:
         lowered = line.lower()
         matches = list(YEARS_OF_EXPERIENCE_PATTERN.finditer(line))
+        if not matches and "summary" not in lowered and "objective" not in lowered:
+            matches = [
+                match
+                for match in ALT_YEARS_OF_EXPERIENCE_PATTERN.finditer(line)
+                if any(keyword in lowered for keyword in ("experience", "business analyst", "developer", "engineer", "analyst", "consultant", "architect", "administrator", "manager"))
+            ]
         if not matches and any(noise in lowered for noise in EXPLICIT_CLAIM_NOISE_WORDS):
             continue
         for match in matches:
@@ -172,6 +188,53 @@ def _extract_explicit_experience_years_claim(text: str) -> float | None:
     if not values:
         return None
     return round(max(values), 1)
+
+
+def _extract_probable_full_name(text: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    header_window = lines[:8]
+    has_contact_nearby = any(
+        ("@" in line) or ("email" in line.lower()) or ("contact" in line.lower()) or ("phone" in line.lower())
+        for line in header_window
+    )
+    for line in header_window:
+        lowered = line.lower()
+        if "@" in line or "email" in lowered or "contact" in lowered or "phone" in lowered:
+            continue
+        if any(token in lowered for token in ("summary", "experience", "education", "skills", "resume")):
+            continue
+        if any(token in lowered for token in ("certified", "certification", "scrum", "developer", "analyst", "master")):
+            continue
+        if not has_contact_nearby:
+            continue
+        word_count = len(line.split())
+        if 2 <= word_count <= 5 and re.fullmatch(r"[A-Za-z .'-]+", line):
+            return line
+    return None
+
+
+def _extract_professional_summary(text: str) -> str | None:
+    lines = text.splitlines()
+    collecting = False
+    summary_lines: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if collecting and summary_lines:
+                break
+            continue
+        if SUMMARY_HEADER_PATTERN.match(line):
+            collecting = True
+            continue
+        if collecting and SECTION_HEADER_PATTERN.match(line):
+            break
+        if collecting:
+            summary_lines.append(line)
+            if len(summary_lines) >= 8:
+                break
+    if not summary_lines:
+        return None
+    return " ".join(summary_lines).strip()
 
 
 def _extract_experience_years(text: str) -> tuple[float | None, str]:
@@ -421,6 +484,9 @@ def extract_resume_features(text: str) -> dict[str, Any]:
     skills = [skill for skill in SKILL_KEYWORDS if skill in text_lower]
     emails = EMAIL_PATTERN.findall(text)
     phones = PHONE_PATTERN.findall(text)
+    full_name = _extract_probable_full_name(text)
+    professional_summary = _extract_professional_summary(text)
+    explicit_claimed_years = _extract_explicit_experience_years_claim(text)
 
     # Heuristic only as fallback
     experience_years, experience_source = _extract_experience_years(text)
@@ -432,7 +498,10 @@ def extract_resume_features(text: str) -> dict[str, Any]:
         current_last_job = experience_entries[0].get("title")
 
     calculated_years = experience_calculation.get("total_years")
-    if isinstance(calculated_years, (int, float)):
+    if explicit_claimed_years is not None:
+        experience_years = round(float(explicit_claimed_years), 1)
+        experience_source = "explicit_claim_from_summary"
+    elif isinstance(calculated_years, (int, float)):
         experience_years = round(float(calculated_years), 1)
         experience_source = "python_from_experience_entries"
     elif experience_source == "inferred_from_dates":
@@ -466,14 +535,21 @@ def extract_resume_features(text: str) -> dict[str, Any]:
         sponsorship_required = None
 
     return {
+        "full_name": full_name,
         "email": emails[0] if emails else None,
         "phone": phones[0] if phones else None,
+        "linkedin_url": None,
+        "github_url": None,
+        "portfolio_url": None,
+        "professional_summary": professional_summary,
         "skills": sorted(set(skills)),
+        "languages": [],
+        "education": [],
         "experience_years": experience_years,
         "experience_source": experience_source,
-        "experience_years_claimed": None,
+        "experience_years_claimed": explicit_claimed_years,
         "experience_years_calculated": calculated_years,
-        "experience_years_final": None,
+        "experience_years_final": experience_years,
         "experience_entries": experience_entries,
         "experience_calculation": experience_calculation,
         "highest_degree": highest_degree,
@@ -481,6 +557,9 @@ def extract_resume_features(text: str) -> dict[str, Any]:
         "distance_miles": None,
         "candidate_location": candidate_location,
         "current_last_job": current_last_job,
+        "raw_text_quality": None,
+        "parser_notes": [],
+        "field_confidence": {},
     }
 
 
@@ -558,12 +637,38 @@ def _merge_llm_fields(parsed: dict[str, Any], llm_parsed: dict[str, Any]) -> dic
 def _finalize_llm_primary_parse(text: str, llm_parsed: dict[str, Any], python_parsed: dict[str, Any]) -> dict[str, Any]:
     finalized = dict(llm_parsed)
 
-    for key in ("email", "phone", "highest_degree", "candidate_location", "current_last_job", "sponsorship_required"):
+    for key in (
+        "full_name",
+        "email",
+        "phone",
+        "highest_degree",
+        "candidate_location",
+        "current_last_job",
+        "sponsorship_required",
+        "linkedin_url",
+        "github_url",
+        "portfolio_url",
+        "professional_summary",
+        "distance_miles",
+        "raw_text_quality",
+    ):
         if finalized.get(key) is None and python_parsed.get(key) is not None:
             finalized[key] = python_parsed.get(key)
 
     if not finalized.get("skills") and python_parsed.get("skills"):
         finalized["skills"] = python_parsed.get("skills", [])
+
+    if not finalized.get("languages") and python_parsed.get("languages"):
+        finalized["languages"] = python_parsed.get("languages", [])
+
+    if not finalized.get("education") and python_parsed.get("education"):
+        finalized["education"] = python_parsed.get("education", [])
+
+    if not finalized.get("parser_notes") and python_parsed.get("parser_notes"):
+        finalized["parser_notes"] = python_parsed.get("parser_notes", [])
+
+    if not finalized.get("field_confidence") and python_parsed.get("field_confidence"):
+        finalized["field_confidence"] = python_parsed.get("field_confidence", {})
 
     if not finalized.get("experience_entries") and python_parsed.get("experience_entries"):
         finalized["experience_entries"] = python_parsed.get("experience_entries", [])
@@ -581,6 +686,8 @@ def _finalize_llm_primary_parse(text: str, llm_parsed: dict[str, Any], python_pa
 
     if finalized.get("experience_years_claimed") is None:
         finalized["experience_years_claimed"] = python_parsed.get("experience_years_claimed")
+    if finalized.get("experience_years_final") is None and finalized.get("experience_years_claimed") is not None:
+        finalized["experience_years_final"] = finalized["experience_years_claimed"]
 
     if finalized.get("experience_years_claimed") is not None:
         finalized["experience_years"] = finalized["experience_years_claimed"]
@@ -670,9 +777,16 @@ def persist_parsed_resume(resume_id: str, text: str, parsed: dict[str, Any]) -> 
                     text,
                     Json(
                         {
+                            "full_name": parsed.get("full_name"),
                             "email": parsed.get("email"),
                             "phone": parsed.get("phone"),
+                            "linkedin_url": parsed.get("linkedin_url"),
+                            "github_url": parsed.get("github_url"),
+                            "portfolio_url": parsed.get("portfolio_url"),
+                            "professional_summary": parsed.get("professional_summary"),
                             "skills": parsed.get("skills", []),
+                            "languages": parsed.get("languages", []),
+                            "education": parsed.get("education", []),
                             "experience_years": parsed.get("experience_years"),
                             "experience_source": parsed.get("experience_source"),
                             "experience_years_claimed": parsed.get("experience_years_claimed"),
@@ -686,6 +800,9 @@ def persist_parsed_resume(resume_id: str, text: str, parsed: dict[str, Any]) -> 
                             "distance_miles": parsed.get("distance_miles"),
                             "candidate_location": parsed.get("candidate_location"),
                             "current_last_job": parsed.get("current_last_job"),
+                            "raw_text_quality": parsed.get("raw_text_quality"),
+                            "parser_notes": parsed.get("parser_notes", []),
+                            "field_confidence": parsed.get("field_confidence", {}),
                         }
                         ),
                     
@@ -715,12 +832,21 @@ def persist_parsed_resume(resume_id: str, text: str, parsed: dict[str, Any]) -> 
             cur.execute(
                 """
                 UPDATE candidates
-                SET primary_email = COALESCE(primary_email, %s),
+                SET full_name = COALESCE(full_name, %s),
+                    primary_email = COALESCE(primary_email, %s),
                     phone = COALESCE(phone, %s),
-                    location = COALESCE(location, %s)
+                    location = COALESCE(location, %s),
+                    linkedin_url = COALESCE(linkedin_url, %s)
                 WHERE id = %s::uuid
                 """,
-                (safe_email, parsed.get("phone"), parsed.get("candidate_location"), candidate_id),
+                (
+                    parsed.get("full_name"),
+                    safe_email,
+                    parsed.get("phone"),
+                    parsed.get("candidate_location"),
+                    parsed.get("linkedin_url"),
+                    candidate_id,
+                ),
             )
         conn.commit()
 

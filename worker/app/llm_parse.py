@@ -20,6 +20,358 @@ LLM_PARSE_MODEL = os.getenv("OPENAI_PARSE_MODEL", "gpt-4.1-mini")
 LLM_PARSE_TIMEOUT = int(os.getenv("LLM_PARSE_TIMEOUT_SECONDS", "60"))
 LLM_PARSE_MAX_RETRIES = int(os.getenv("LLM_PARSE_MAX_RETRIES", "2"))
 
+ATS_RESUME_SCHEMA_DESCRIPTION = """You are an enterprise-grade resume parsing engine used inside a modern Applicant Tracking System (ATS).
+
+Your task is to read raw resume text and convert it into a single structured JSON object for downstream recruiting workflows such as candidate search, ranking, filtering, and profile review.
+
+This parser is used in production. The output will be consumed by software systems, scoring engines, and recruiter dashboards. Accuracy, completeness, and schema compliance are more important than creativity.
+
+You must be robust to:
+- inconsistent formatting
+- broken line spacing
+- OCR noise
+- multi-page resumes
+- unusual section titles
+- mixed date formats
+- consulting/client-based resume structures
+- resumes with missing headings
+- resumes that place contact info, work history, and education in nonstandard positions
+
+Your goal is to recover the most accurate structured candidate profile possible from the resume text alone.
+
+--------------------------------
+
+PRIMARY OBJECTIVE
+
+Extract a complete candidate profile from raw resume text and return valid JSON matching the exact schema.
+
+The parser must prioritize:
+1. factual extraction
+2. complete work history capture
+3. date normalization
+4. accurate skills and current role extraction
+5. consistent null handling when information is missing
+
+--------------------------------
+
+STRICT OUTPUT RULES
+
+1. Output MUST be valid JSON only.
+2. Output MUST match the schema exactly.
+3. Do NOT output markdown.
+4. Do NOT output explanations.
+5. Do NOT invent information.
+6. If a value is not explicitly supported by the resume text, return null.
+7. If a list-based field has no items, return an empty array.
+8. Capture all work experience roles that appear to be professional employment.
+9. Do not omit older roles just because the resume is long.
+10. Do not extract fields from job descriptions, references, or unrelated boilerplate.
+11. Prefer precision over aggressive guessing.
+12. If information is ambiguous, return the best-supported value and add a short note in parser_notes.
+
+--------------------------------
+
+FIELD EXTRACTION PRIORITIES
+
+When information conflicts across sections:
+- Prefer explicit contact/header information for name, email, phone, and location.
+- Prefer the most recent work experience section for current_last_job.
+- Prefer structured work history dates over narrative statements when calculating experience.
+- Prefer explicit summary-based years of experience only for experience_years_claimed.
+- Prefer calculated years for experience_years_final only when calculation is reliable and based on actual work roles.
+- Do not use education dates as professional experience.
+- Do not use project dates, certification dates, or volunteer dates as professional experience.
+
+--------------------------------
+
+CONTACT INFORMATION EXTRACTION
+
+Extract if present:
+- full_name
+- email
+- phone
+- candidate_location
+- linkedin_url
+- github_url
+- portfolio_url
+
+Location normalization:
+- US example: City, ST
+- International example: City, Country
+
+Use the candidate's personal location only.
+Do NOT confuse company location, job location, client location, or employer office location with candidate_location.
+
+--------------------------------
+
+DISTANCE FIELD
+
+distance_miles represents the approximate distance between the candidate's location and the target job location.
+
+Rules:
+- If job location is NOT provided in the input context, return null.
+- If candidate_location is missing, return null.
+- If both are present and can be reasonably compared, return a numeric miles value.
+- Do not guess distance without both locations.
+
+--------------------------------
+
+PROFESSIONAL SUMMARY
+
+Extract professional_summary if present.
+
+Common headings:
+- Summary
+- Professional Summary
+- Profile
+- About Me
+- Career Summary
+
+If no summary exists, return null.
+
+--------------------------------
+
+SKILLS EXTRACTION
+
+Extract a deduplicated list of meaningful skills from the resume.
+
+Include:
+- programming languages
+- frameworks
+- libraries
+- databases
+- BI / analytics tools
+- cloud platforms
+- DevOps tools
+- enterprise platforms
+- data tools
+- relevant professional tools
+- important soft skills if explicitly stated
+
+Do not include vague filler phrases unless they are clearly presented as skills.
+
+--------------------------------
+
+LANGUAGES
+
+Extract spoken languages if explicitly mentioned.
+
+--------------------------------
+
+WORK EXPERIENCE EXTRACTION
+
+Identify all professional work roles.
+
+Possible headings:
+- Work Experience
+- Professional Experience
+- Employment History
+- Career History
+- Industry Experience
+- Client Experience
+- Consulting Experience
+
+Ignore roles under:
+- Education
+- Projects
+- Certifications
+- Awards
+- Volunteer
+- Extracurriculars
+
+Each professional role must include:
+- company
+- title
+- location
+- start_date
+- end_date
+- is_current
+- employment_type
+- responsibilities
+- related_skills
+
+Responsibilities:
+- extract bullet points or narrative responsibility lines belonging to that role
+- keep them concise but factual
+
+related_skills:
+- extract technologies, tools, platforms, or methods specifically associated with that role
+
+--------------------------------
+
+CLIENT / CONSULTING STRUCTURES
+
+For consulting resumes, preserve the real employer as company.
+
+If client information is present but not part of schema, do not invent a new top-level key.
+If needed, mention ambiguity briefly in parser_notes.
+
+--------------------------------
+
+DATE NORMALIZATION
+
+Normalize dates to:
+- YYYY-MM
+- YYYY
+- null
+
+If ongoing:
+- is_current = true
+- end_date = null
+
+Recognize variants like:
+- Present
+- Current
+- Till Date
+- Till now
+- Ongoing
+
+--------------------------------
+
+CURRENT LAST JOB
+
+Identify the most recent professional role.
+
+Return only the job title.
+Do not include the company name in current_last_job.
+
+--------------------------------
+
+EDUCATION EXTRACTION
+
+Extract all education entries.
+
+Possible headings:
+- Education
+- Academic Background
+- Qualifications
+- Academic Qualifications
+
+Fields:
+- institution
+- degree
+- field_of_study
+- start_date
+- end_date
+- gpa
+- location
+
+highest_degree should represent the highest completed degree.
+
+--------------------------------
+
+EXPERIENCE YEARS
+
+experience_years_claimed
+- Extract only if the resume explicitly states a total years-of-experience claim.
+- Do not extract unrelated year counts such as company history, industry age, or project duration not tied to candidate total experience.
+
+experience_years_calculated
+- Calculate based on professional work roles only.
+- Use start and end dates from experience_entries.
+- Avoid double counting overlapping jobs.
+- Exclude education, projects, certifications, and volunteer work.
+
+experience_years_final
+- Prefer calculated value if it is reliable.
+- If the resume explicitly claims total experience and the calculated value is weak or incomplete, use the claimed value.
+- If both exist and differ significantly, prefer the value best supported by the resume and mention the discrepancy in parser_notes.
+
+--------------------------------
+
+RAW TEXT QUALITY
+
+Estimate raw_text_quality as one of:
+- high
+- medium
+- low
+
+--------------------------------
+
+PARSER NOTES
+
+Add short notes when:
+- work history is ambiguous
+- dates are incomplete
+- section boundaries are unclear
+- candidate location is uncertain
+- claimed and calculated experience conflict
+- consulting/client structure required interpretation
+
+If no notes are needed, return an empty array.
+
+--------------------------------
+
+CONFIDENCE SCORES
+
+Provide confidence values between 0 and 1 for:
+- full_name
+- email
+- phone
+- candidate_location
+- current_last_job
+- highest_degree
+- skills
+- experience_entries
+- experience_years_final
+"""
+
+ATS_RESUME_OUTPUT_SCHEMA = """{
+  "full_name": null,
+  "email": null,
+  "phone": null,
+  "candidate_location": null,
+  "distance_miles": null,
+  "linkedin_url": null,
+  "github_url": null,
+  "portfolio_url": null,
+  "professional_summary": null,
+  "skills": [],
+  "languages": [],
+  "highest_degree": null,
+  "education": [
+    {
+      "institution": null,
+      "degree": null,
+      "field_of_study": null,
+      "start_date": null,
+      "end_date": null,
+      "gpa": null,
+      "location": null
+    }
+  ],
+  "current_last_job": null,
+  "experience_entries": [
+    {
+      "company": null,
+      "title": null,
+      "location": null,
+      "start_date": null,
+      "end_date": null,
+      "is_current": false,
+      "employment_type": null,
+      "responsibilities": [],
+      "related_skills": []
+    }
+  ],
+  "experience_years_claimed": null,
+  "experience_years_calculated": null,
+  "experience_years_final": null,
+  "raw_text_quality": null,
+  "parser_notes": [],
+  "field_confidence": {
+    "full_name": null,
+    "email": null,
+    "phone": null,
+    "candidate_location": null,
+    "current_last_job": null,
+    "highest_degree": null,
+    "skills": null,
+    "experience_entries": null,
+    "experience_years_final": null
+  }
+}"""
+
 WORK_START_PATTERN = re.compile(
     r"^(work experience|professional experience|employment history|experience)\s*:?\s*$",
     re.IGNORECASE,
@@ -48,10 +400,26 @@ DATE_LOCATION_LINE_PATTERN = re.compile(
     r"^(?P<location>.+?)\s*\|\s*(?P<dates>.+)$",
     re.IGNORECASE,
 )
-CLIENT_LINE_PATTERN = re.compile(r"^Client:\s*(?P<company>.+?)\s*,\s*(?P<location>[A-Za-z]{2}|[A-Za-z .'-]+)\s+(?P<dates>.+)$", re.IGNORECASE)
-ROLE_LINE_PATTERN = re.compile(r"^Role:\s*(?P<title>.+)$", re.IGNORECASE)
+COMPANY_LOCATION_DATE_LINE_PATTERN = re.compile(
+    r"^(?P<company>.+?)\s*:\s*(?P<location>.+?)\s+(?P<dates>(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December|19\d{2}|20\d{2}).+)$",
+    re.IGNORECASE,
+)
+CLIENT_LINE_PATTERN = re.compile(
+    r"^Client\s*:\s*(?P<company>.+?)\s{2,}(?P<dates>.+)$",
+    re.IGNORECASE,
+)
+ROLE_LINE_PATTERN = re.compile(r"^Role\s*:\s*(?P<title>.+)$", re.IGNORECASE)
+LOCATION_LABEL_PATTERN = re.compile(r"^Location\s*:\s*(?P<location>.+)$", re.IGNORECASE)
 
 DATE_RANGE_PATTERNS = [
+    re.compile(
+        r"(?P<smon>[A-Za-z]{3,9})[’'](?P<syr2>\d{2,4})\s*(?:-|–|—|to)\s*(?:(?P<emon>[A-Za-z]{3,9})[’'](?P<eyr2>\d{2,4})|(?P<ep>Present|Current|Now|Today|Till(?:\s+Date)?))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?P<smon_ns>[A-Za-z]{3,9})(?P<syr_ns>\d{4})\s*(?:-|–|—|to)\s*(?:(?P<emon_ns>[A-Za-z]{3,9})(?P<eyr_ns>\d{4})|(?P<ep_ns>Present|Current|Now|Today|Till(?:\s+Date)?))",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"(?P<sy>\d{4})[-/.](?P<sm>\d{1,2})\s*[-–—to]+\s*(?:(?P<ey>\d{4})[-/.](?P<em>\d{1,2})|(?P<ep>Present|Current|Now|Today))",
         re.IGNORECASE,
@@ -75,6 +443,12 @@ EXPLICIT_EXPERIENCE_PATTERN = re.compile(
     r"(?P<years>\d+(?:\.\d+)?)\s*\+?\s*"
     r"(?:years?|yrs?)"
     r"(?:\s+of)?(?:\s+\w+){0,6}?\s+experience",
+    re.IGNORECASE,
+)
+ALT_EXPLICIT_EXPERIENCE_PATTERN = re.compile(
+    r"(?:for\s+)?(?:more\s+than|over|around|approximately|nearly)?\s*"
+    r"(?P<years>\d{1,2}(?:\.\d+)?)\s*\+?\s*"
+    r"(?:years?|yrs?)\b",
     re.IGNORECASE,
 )
 EXPLICIT_NOISE_WORDS = (
@@ -105,9 +479,19 @@ MONTH_MAP = {
 PRESENT_WORDS = {"present", "current", "now", "today", "till", "till date"}
 
 DEGREE_KEYWORDS = {
-    "bachelor", "master", "mba", "phd", "doctor", "b.tech", "m.tech",
-    "b.s", "m.s", "bs", "ms", "bachelors", "masters"
+    "bachelor of",
+    "master of",
+    "mba",
+    "phd",
+    "doctorate",
+    "b.tech",
+    "m.tech",
+    "b.s",
+    "m.s",
+    "bs",
+    "ms",
 }
+ENVIRONMENT_LINE_PATTERN = re.compile(r"^environment\s*:", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -171,46 +555,19 @@ def parse_resume_with_llm(text: str) -> dict[str, Any] | None:
     claimed_years = _extract_explicit_experience_years(text)
 
     system_prompt = (
-        "You are a strict resume parsing engine.\n"
-        "Return ONLY valid JSON. No markdown. No explanation.\n\n"
-        "Return EXACTLY this object shape:\n"
-        "{\n"
-        '  "email": string|null,\n'
-        '  "phone": string|null,\n'
-        '  "skills": string[],\n'
-        '  "highest_degree": string|null,\n'
-        '  "candidate_location": string|null,\n'
-        '  "current_last_job": string|null,\n'
-        '  "experience_years_claimed": number|null,\n'
-        '  "experience_entries": [\n'
-        "    {\n"
-        '      "title": string|null,\n'
-        '      "company": string|null,\n'
-        '      "start_date": string|null,\n'
-        '      "end_date": string|null,\n'
-        '      "is_current": boolean,\n'
-        '      "section": string|null,\n'
-        '      "employment_type": string|null\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "Rules:\n"
-        "1) Do NOT calculate total experience from roles.\n"
-        "2) Capture ALL professional experience roles present in the provided experience section.\n"
-        "3) Do NOT omit older roles just because the resume is long.\n"
-        "4) If many companies are present, include all of them in experience_entries.\n"
-        "5) When company/title/location/date appear on one line, treat them as one role.\n"
-        "6) Include internships only if they are part of professional work history.\n"
-        "7) Exclude education, certifications, and training sections.\n"
-        "8) Normalize dates as YYYY-MM, YYYY, or null.\n"
-        "9) current_last_job must be title only.\n"
-        "10) candidate_location must be US-only in format 'City, ST'; if uncertain or non-US, return null.\n"
-        "11) Prefer extracting from the full raw resume text, not only the experience section.\n"
-        "12) If dates are written as YYYY-MM to YYYY-MM, preserve them in normalized form."
+        f"{ATS_RESUME_SCHEMA_DESCRIPTION}\n\n"
+        "--------------------------------\n\n"
+        "OUTPUT SCHEMA\n\n"
+        f"{ATS_RESUME_OUTPUT_SCHEMA}\n\n"
+        "Before returning JSON, internally verify that:\n"
+        "- current_last_job matches the most recent role\n"
+        "- education dates are not counted as work experience\n"
+        "- experience_years_final is supported by either explicit claim or work history dates\n"
     )
 
     header_excerpt = _extract_header_excerpt(text, max_lines=35)
     user_prompt = (
+        "JOB LOCATION: null\n\n"
         f"Resume Header Excerpt (contact/details):\n{header_excerpt[:3000]}\n\n"
         f"Full Resume Text:\n{text[:24000]}\n\n"
         f"Work Experience Section:\n{work_excerpt[:12000]}\n\n"
@@ -347,40 +704,18 @@ def reconcile_resume_parse_with_llm(
         return None
 
     system_prompt = (
-        "You are a strict resume parsing validator.\n"
-        "Return ONLY valid JSON. No markdown. No explanation.\n\n"
+        f"{ATS_RESUME_SCHEMA_DESCRIPTION}\n\n"
+        "You are given two candidate parses: one from an LLM and one from Python validation heuristics.\n"
         "Use the full raw resume text as the source of truth.\n"
-        "You are given two candidate parses: one from an LLM and one from Python heuristics.\n"
-        "Resolve disparities and return ONE corrected final JSON object.\n\n"
-        "Return EXACTLY this object shape:\n"
-        "{\n"
-        '  "email": string|null,\n'
-        '  "phone": string|null,\n'
-        '  "skills": string[],\n'
-        '  "highest_degree": string|null,\n'
-        '  "candidate_location": string|null,\n'
-        '  "current_last_job": string|null,\n'
-        '  "experience_years_claimed": number|null,\n'
-        '  "experience_entries": [\n'
-        "    {\n"
-        '      "title": string|null,\n'
-        '      "company": string|null,\n'
-        '      "start_date": string|null,\n'
-        '      "end_date": string|null,\n'
-        '      "is_current": boolean,\n'
-        '      "section": string|null,\n'
-        '      "employment_type": string|null,\n'
-        '      "location": string|null\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "Rules:\n"
+        "Resolve the disparities and return one corrected final JSON object.\n\n"
+        "OUTPUT SCHEMA\n\n"
+        f"{ATS_RESUME_OUTPUT_SCHEMA}\n\n"
+        "Additional reconciliation rules:\n"
         "1) Prefer explicit summary years only when they clearly refer to total work experience.\n"
         "2) current_last_job must be title only.\n"
-        "3) candidate_location must be US-only in format 'City, ST'; otherwise null.\n"
-        "4) Exclude education/project-only entries from experience_entries.\n"
-        "5) Normalize dates strictly as YYYY-MM, YYYY, or null.\n"
-        "6) If one parser is clearly wrong and the raw text is clear, fix it."
+        "3) Exclude education/project-only entries from experience_entries.\n"
+        "4) If one parser is clearly wrong and the raw text is clear, fix it.\n"
+        "5) Do not carry forward incorrect values just because they appear in one candidate parse."
     )
     user_prompt = (
         f"Full Resume Text:\n{text[:26000]}\n\n"
@@ -476,16 +811,49 @@ def _summarize_parse_discrepancies(
 
 
 def _normalize_llm_parse_output(parsed: dict[str, Any], resume_text: str) -> dict[str, Any]:
+    parsed["full_name"] = parsed.get("full_name") if isinstance(parsed.get("full_name"), str) else None
     parsed["email"] = parsed.get("email") if isinstance(parsed.get("email"), str) else None
     parsed["phone"] = parsed.get("phone") if isinstance(parsed.get("phone"), str) else None
     parsed["highest_degree"] = parsed.get("highest_degree") if isinstance(parsed.get("highest_degree"), str) else None
     parsed["candidate_location"] = parsed.get("candidate_location") if isinstance(parsed.get("candidate_location"), str) else None
     parsed["current_last_job"] = parsed.get("current_last_job") if isinstance(parsed.get("current_last_job"), str) else None
+    parsed["linkedin_url"] = parsed.get("linkedin_url") if isinstance(parsed.get("linkedin_url"), str) else None
+    parsed["github_url"] = parsed.get("github_url") if isinstance(parsed.get("github_url"), str) else None
+    parsed["portfolio_url"] = parsed.get("portfolio_url") if isinstance(parsed.get("portfolio_url"), str) else None
+    parsed["professional_summary"] = (
+        parsed.get("professional_summary")
+        if isinstance(parsed.get("professional_summary"), str)
+        else None
+    )
+    parsed["raw_text_quality"] = (
+        parsed.get("raw_text_quality")
+        if parsed.get("raw_text_quality") in {"high", "medium", "low"}
+        else None
+    )
 
     skills = parsed.get("skills", [])
     if not isinstance(skills, list):
         skills = []
     parsed["skills"] = _unique_clean_strings(skills)
+
+    languages = parsed.get("languages", [])
+    if not isinstance(languages, list):
+        languages = []
+    parsed["languages"] = _unique_clean_strings(languages)
+
+    parser_notes = parsed.get("parser_notes", [])
+    if not isinstance(parser_notes, list):
+        parser_notes = []
+    parsed["parser_notes"] = _unique_clean_strings(parser_notes)
+
+    education = parsed.get("education", [])
+    if not isinstance(education, list):
+        education = []
+    parsed["education"] = [
+        _normalize_education_entry(entry)
+        for entry in education
+        if isinstance(entry, dict)
+    ]
 
     experience_entries = parsed.get("experience_entries", [])
     if not isinstance(experience_entries, list):
@@ -501,6 +869,31 @@ def _normalize_llm_parse_output(parsed: dict[str, Any], resume_text: str) -> dic
         parsed["experience_years_claimed"] = round(float(claimed), 1)
     else:
         parsed["experience_years_claimed"] = _extract_explicit_experience_years(resume_text)
+
+    for field in ("experience_years_calculated", "experience_years_final", "distance_miles"):
+        value = parsed.get(field)
+        if isinstance(value, (int, float)):
+            parsed[field] = round(float(value), 1)
+        else:
+            parsed[field] = None
+
+    field_confidence = parsed.get("field_confidence", {})
+    if not isinstance(field_confidence, dict):
+        field_confidence = {}
+    parsed["field_confidence"] = {
+        key: _normalize_confidence(field_confidence.get(key))
+        for key in (
+            "full_name",
+            "email",
+            "phone",
+            "candidate_location",
+            "current_last_job",
+            "highest_degree",
+            "skills",
+            "experience_entries",
+            "experience_years_final",
+        )
+    }
 
     sponsorship_required = parsed.get("sponsorship_required")
     if isinstance(sponsorship_required, bool) or sponsorship_required is None:
@@ -521,7 +914,32 @@ def _normalize_experience_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "section": _clean_string(entry.get("section")),
         "employment_type": _clean_string(entry.get("employment_type")),
         "location": _clean_string(entry.get("location") or entry.get("candidate_location_from_role")),
+        "responsibilities": _unique_clean_strings(entry.get("responsibilities", [])) if isinstance(entry.get("responsibilities"), list) else [],
+        "related_skills": _unique_clean_strings(entry.get("related_skills", [])) if isinstance(entry.get("related_skills"), list) else [],
     }
+
+
+def _normalize_education_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "institution": _clean_string(entry.get("institution")),
+        "degree": _clean_string(entry.get("degree")),
+        "field_of_study": _clean_string(entry.get("field_of_study")),
+        "start_date": _clean_date_string(entry.get("start_date")),
+        "end_date": _clean_date_string(entry.get("end_date")),
+        "gpa": _clean_string(entry.get("gpa")),
+        "location": _clean_string(entry.get("location")),
+    }
+
+
+def _normalize_confidence(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if numeric < 0:
+        return 0.0
+    if numeric > 1:
+        return 1.0
+    return round(numeric, 2)
 
 
 def _pick_final_experience_years(claimed: float | None, calculated: float | None) -> tuple[float | None, str]:
@@ -551,6 +969,9 @@ def _parse_single_job_block(block: str) -> dict[str, Any] | None:
     if not lines:
         return None
 
+    if ENVIRONMENT_LINE_PATTERN.match(lines[0]):
+        return None
+
     company = None
     title = None
     location = None
@@ -563,8 +984,23 @@ def _parse_single_job_block(block: str) -> dict[str, Any] | None:
     client_match = CLIENT_LINE_PATTERN.match(first_line)
     if client_match:
         company = client_match.group("company").strip()
-        location = client_match.group("location").strip()
         interval_info = _extract_normalized_dates_from_text(client_match.group("dates"))
+        if interval_info:
+            start_date, end_date, is_current = interval_info
+
+        for line in lines[1:8]:
+            location_match = LOCATION_LABEL_PATTERN.match(line)
+            if location_match and location is None:
+                location = location_match.group("location").strip()
+            role_match = ROLE_LINE_PATTERN.match(line)
+            if role_match:
+                title = role_match.group("title").strip()
+
+    company_location_date_match = COMPANY_LOCATION_DATE_LINE_PATTERN.match(first_line)
+    if company_location_date_match:
+        company = company_location_date_match.group("company").strip()
+        location = company_location_date_match.group("location").strip()
+        interval_info = _extract_normalized_dates_from_text(company_location_date_match.group("dates"))
         if interval_info:
             start_date, end_date, is_current = interval_info
 
@@ -572,6 +1008,9 @@ def _parse_single_job_block(block: str) -> dict[str, Any] | None:
             role_match = ROLE_LINE_PATTERN.match(line)
             if role_match:
                 title = role_match.group("title").strip()
+                break
+            if title is None and not _line_contains_date_range(line) and ":" not in line and len(line.split()) <= 8:
+                title = line.strip()
                 break
 
     # Split only on pipe first
@@ -674,6 +1113,10 @@ def extract_job_blocks(text: str) -> list[str]:
         if SECTION_EXCLUDE_HEADERS.match(line):
             break
 
+        if ENVIRONMENT_LINE_PATTERN.match(line):
+            i += 1
+            continue
+
         if CLIENT_LINE_PATTERN.match(line):
             block_lines = [line]
             j = i + 1
@@ -684,6 +1127,25 @@ def extract_job_blocks(text: str) -> list[str]:
                     break
 
                 if j > i and CLIENT_LINE_PATTERN.match(candidate):
+                    break
+
+                block_lines.append(candidate)
+                j += 1
+
+            blocks.append("\n".join(block_lines))
+            i = j
+            continue
+
+        if COMPANY_LOCATION_DATE_LINE_PATTERN.match(line):
+            block_lines = [line]
+            j = i + 1
+            while j < len(lines):
+                candidate = lines[j]
+
+                if SECTION_EXCLUDE_HEADERS.match(candidate):
+                    break
+
+                if j > i and (CLIENT_LINE_PATTERN.match(candidate) or COMPANY_LOCATION_DATE_LINE_PATTERN.match(candidate)):
                     break
 
                 block_lines.append(candidate)
@@ -783,6 +1245,9 @@ def _looks_like_new_job_start_relaxed(lines: list[str], idx: int) -> bool:
     if CLIENT_LINE_PATTERN.match(line):
         return True
 
+    if COMPANY_LOCATION_DATE_LINE_PATTERN.match(line):
+        return True
+
     if _looks_like_multiline_job_start(lines, idx):
         return True
 
@@ -866,6 +1331,47 @@ def _extract_normalized_dates_from_text(text: str) -> tuple[str | None, str | No
 
         gd = match.groupdict()
 
+        if gd.get("smon") and gd.get("syr2"):
+            s_month = MONTH_MAP.get(gd["smon"].lower())
+            if not s_month:
+                continue
+            s_year = _normalize_two_or_four_digit_year(gd["syr2"])
+            if s_year is None:
+                continue
+            start = f"{s_year:04d}-{s_month:02d}"
+
+            e_raw = (gd.get("ep") or "").lower()
+            if e_raw in PRESENT_WORDS:
+                return start, None, True
+
+            end_month_name = gd.get("emon")
+            end_year_raw = gd.get("eyr2")
+            if end_month_name and end_year_raw:
+                e_month = MONTH_MAP.get(end_month_name.lower())
+                e_year = _normalize_two_or_four_digit_year(end_year_raw)
+                if e_month and e_year:
+                    end = f"{e_year:04d}-{e_month:02d}"
+                    return start, end, False
+
+        if gd.get("smon_ns") and gd.get("syr_ns"):
+            s_month = MONTH_MAP.get(gd["smon_ns"].lower())
+            if not s_month:
+                continue
+            s_year = int(gd["syr_ns"])
+            start = f"{s_year:04d}-{s_month:02d}"
+
+            e_raw = (gd.get("ep_ns") or "").lower()
+            if e_raw in PRESENT_WORDS:
+                return start, None, True
+
+            end_month_name = gd.get("emon_ns")
+            end_year_raw = gd.get("eyr_ns")
+            if end_month_name and end_year_raw:
+                e_month = MONTH_MAP.get(end_month_name.lower())
+                if e_month:
+                    end = f"{int(end_year_raw):04d}-{e_month:02d}"
+                    return start, end, False
+
         if gd.get("sy") and gd.get("sm"):
             s_year = int(gd["sy"])
             s_month = int(gd["sm"])
@@ -934,6 +1440,17 @@ def _extract_normalized_dates_from_text(text: str) -> tuple[str | None, str | No
                 end = f"{int(e_raw):04d}"
                 return start, end, False
 
+    return None
+
+
+def _normalize_two_or_four_digit_year(value: str) -> int | None:
+    if not value.isdigit():
+        return None
+    if len(value) == 4:
+        return int(value)
+    if len(value) == 2:
+        year = int(value)
+        return 2000 + year if year <= 30 else 1900 + year
     return None
 
 
@@ -1141,6 +1658,12 @@ def _extract_explicit_experience_years(text: str) -> float | None:
     for line in lines[:60]:
         lowered = line.lower()
         matches = list(EXPLICIT_EXPERIENCE_PATTERN.finditer(line))
+        if not matches and "summary" not in lowered and "objective" not in lowered:
+            matches = [
+                match
+                for match in ALT_EXPLICIT_EXPERIENCE_PATTERN.finditer(line)
+                if any(keyword in lowered for keyword in ("experience", "business analyst", "developer", "engineer", "analyst", "consultant", "architect", "administrator", "manager"))
+            ]
         if not matches and any(noise in lowered for noise in EXPLICIT_NOISE_WORDS):
             continue
         for match in matches:

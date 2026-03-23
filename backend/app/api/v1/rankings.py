@@ -11,6 +11,9 @@ from app.schemas.rankings import (
     ExplanationResponse,
     GoldenDatasetPayload,
     GoldenDatasetResponse,
+    InterviewTaskListResponse,
+    InterviewTaskRow,
+    InterviewTaskScheduleRequest,
     RankingDiffRow,
     RankingListResponse,
 )
@@ -26,8 +29,10 @@ from app.services.ranking_service import (
     add_candidate_action,
     clear_candidate_action,
     get_candidate_explanation,
+    list_interview_tasks,
     get_rankings_for_job,
     run_ranking_for_job,
+    schedule_interview_task,
 )
 
 router = APIRouter()
@@ -330,3 +335,56 @@ def upsert_golden_dataset(
         expected_top_candidate_ids=stored.get("expected_top_candidate_ids", []),
         expected_top_candidate_names=stored.get("expected_top_candidate_names", []),
     )
+
+
+@router.get("/{job_id}/tasks", response_model=InterviewTaskListResponse)
+def get_interview_tasks(job_id: str, db: Session = Depends(get_db)) -> InterviewTaskListResponse:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid job_id format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    items = list_interview_tasks(db, job_id=parsed_job_id)
+    return InterviewTaskListResponse(
+        job_id=job_id,
+        count=len(items),
+        items=[InterviewTaskRow(**item) for item in items],
+    )
+
+
+@router.post("/{job_id}/tasks/interviews/{candidate_id}/schedule", response_model=InterviewTaskRow)
+def schedule_interview(
+    job_id: str,
+    candidate_id: str,
+    payload: InterviewTaskScheduleRequest,
+    db: Session = Depends(get_db),
+) -> InterviewTaskRow:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+        parsed_candidate_id = uuid.UUID(candidate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid UUID format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    try:
+        row = schedule_interview_task(
+            db,
+            job_id=parsed_job_id,
+            candidate_id=parsed_candidate_id,
+            starts_at=payload.starts_at,
+            ends_at=payload.ends_at,
+            interviewer=payload.interviewer,
+            notes=payload.notes,
+            timezone_name=payload.timezone,
+            meeting_link=payload.meeting_link,
+            created_by=DEFAULT_USER_ID,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return InterviewTaskRow(**row)

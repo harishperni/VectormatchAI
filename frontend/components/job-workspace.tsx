@@ -6,6 +6,7 @@ import CandidatePipelineBoard from "@/components/candidate-pipeline-board";
 import Link from "next/link";
 
 import CandidateReviewWorkspace from "@/components/candidate-review-workspace";
+import InterviewTasksTab from "@/components/interview-tasks-tab";
 import ParsedResumesTable from "@/components/parsed-resumes-table";
 import ResumeUploadPanel from "@/components/resume-upload-panel";
 import type { ParsedResumeRow, RankingRow } from "@/lib/api";
@@ -22,7 +23,9 @@ export default function JobWorkspace({
   const [localRankings, setLocalRankings] = useState<RankingRow[]>(rankings);
   const [localResumes, setLocalResumes] = useState<ParsedResumeRow[]>(resumes);
   const [showPipeline, setShowPipeline] = useState(false);
+  const [activeTab, setActiveTab] = useState<"workspace" | "tasks">("workspace");
   const storageKey = `ats:job:${jobId}:showKanban`;
+  const tabStorageKey = `ats:job:${jobId}:activeTab`;
   const [refreshing, setRefreshing] = useState(false);
   const refreshTimer = useRef<number | null>(null);
 
@@ -32,10 +35,14 @@ export default function JobWorkspace({
       if (saved === "true") {
         setShowPipeline(true);
       }
+      const savedTab = window.localStorage.getItem(tabStorageKey);
+      if (savedTab === "tasks") {
+        setActiveTab("tasks");
+      }
     } catch {
       // ignore storage errors
     }
-  }, [storageKey]);
+  }, [storageKey, tabStorageKey]);
 
   useEffect(() => {
     setLocalRankings(rankings);
@@ -104,10 +111,44 @@ export default function JobWorkspace({
         <div>
           <p className="text-xs uppercase tracking-wide text-slate-500">Workspace</p>
           <p className="text-sm text-slate-600">
-            View: {showPipeline ? "Kanban + Table" : "Table only"}
+            View: {activeTab === "tasks" ? "Interview Tasks" : showPipeline ? "Kanban + Table" : "Table only"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => {
+              setActiveTab("workspace");
+              try {
+                window.localStorage.setItem(tabStorageKey, "workspace");
+              } catch {
+                // ignore storage errors
+              }
+            }}
+            className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+              activeTab === "workspace"
+                ? "border-slate-900 bg-slate-900 text-white"
+                : "border-slate-300 bg-white text-slate-700"
+            }`}
+          >
+            Workspace
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab("tasks");
+              try {
+                window.localStorage.setItem(tabStorageKey, "tasks");
+              } catch {
+                // ignore storage errors
+              }
+            }}
+            className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+              activeTab === "tasks"
+                ? "border-slate-900 bg-slate-900 text-white"
+                : "border-slate-300 bg-white text-slate-700"
+            }`}
+          >
+            Tasks
+          </button>
           <button
             onClick={() =>
               setShowPipeline((prev) => {
@@ -140,25 +181,31 @@ export default function JobWorkspace({
         </div>
       </header>
 
-      {!showPipeline ? <ResumeUploadPanel jobId={jobId} /> : null}
-      {showPipeline ? (
-        <CandidatePipelineBoard
-          jobId={jobId}
-          rows={localRankings}
-          onActionUpdated={(candidateId, action) => {
-            setLocalRankings((prev) =>
-              prev.map((row) =>
-                row.candidate_id === candidateId
-                  ? { ...row, action_status: action === "reset" ? null : action }
-                  : row
-              )
-            );
-          }}
-        />
+      {activeTab === "tasks" ? (
+        <InterviewTasksTab jobId={jobId} />
       ) : (
         <>
-          <CandidateReviewWorkspace jobId={jobId} rows={localRankings} resumes={localResumes} />
-          <ParsedResumesTable jobId={jobId} rows={localResumes} onDeleted={refreshWorkspace} />
+          {!showPipeline ? <ResumeUploadPanel jobId={jobId} /> : null}
+          {showPipeline ? (
+            <CandidatePipelineBoard
+              jobId={jobId}
+              rows={localRankings}
+              onActionUpdated={(candidateId, action) => {
+                setLocalRankings((prev) =>
+                  prev.map((row) =>
+                    row.candidate_id === candidateId
+                      ? { ...row, action_status: action === "reset" ? null : action }
+                      : row
+                  )
+                );
+              }}
+            />
+          ) : (
+            <>
+              <CandidateReviewWorkspace jobId={jobId} rows={localRankings} resumes={localResumes} />
+              <ParsedResumesTable jobId={jobId} rows={localResumes} onDeleted={refreshWorkspace} />
+            </>
+          )}
         </>
       )}
     </div>

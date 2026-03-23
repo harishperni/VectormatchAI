@@ -9,7 +9,7 @@
 ## Quick start
 1. Backend
    - `cd backend`
-   - `python -m venv .venv && source .venv/bin/activate`
+   - `python3.11 -m venv .venv && source .venv/bin/activate`
    - `pip install -r requirements.txt`
    - `python -m alembic upgrade head`
    - `uvicorn app.main:app --reload --port 8000`
@@ -22,9 +22,25 @@
 
 3. Worker (queue consumer)
    - `cd worker`
-   - `python -m venv .venv && source .venv/bin/activate`
+   - `python3.11 -m venv .venv && source .venv/bin/activate`
    - `pip install -r requirements.txt`
    - `python -m app.main`
+
+## Known-good startup (recommended)
+- Prerequisites:
+  - Python 3.11
+  - Node.js + npm
+  - Docker Desktop (running)
+- One-time setup:
+  - `make setup`
+- Start infra + migrations:
+  - `make dev-up`
+- Start all services in one shell:
+  - `make dev-all`
+- Open:
+  - `http://localhost:3000/recruiter`
+- Stop infra:
+  - `make infra-down`
 
 ## One-command local startup
 - Infra + migrations:

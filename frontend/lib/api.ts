@@ -113,6 +113,25 @@ export type CandidateExplanation = {
   strengths?: string[];
 };
 
+export type InterviewTask = {
+  task_id: string;
+  candidate_id: string;
+  candidate_name: string;
+  candidate_email?: string | null;
+  status: string;
+  title: string;
+  interviewer?: string | null;
+  notes?: string | null;
+  meeting_provider: string;
+  meeting_link?: string | null;
+  google_calendar_url?: string | null;
+  scheduled_start_at?: string | null;
+  scheduled_end_at?: string | null;
+  timezone?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchJobs(): Promise<Job[]> {

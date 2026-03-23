@@ -90,3 +90,37 @@ class GoldenDatasetResponse(BaseModel):
     job_id: str
     expected_top_candidate_ids: list[str] = Field(default_factory=list)
     expected_top_candidate_names: list[str] = Field(default_factory=list)
+
+
+class InterviewTaskRow(BaseModel):
+    task_id: str
+    candidate_id: str
+    candidate_name: str
+    candidate_email: str | None = None
+    status: str
+    title: str
+    interviewer: str | None = None
+    notes: str | None = None
+    meeting_provider: str
+    meeting_link: str | None = None
+    google_calendar_url: str | None = None
+    scheduled_start_at: str | None = None
+    scheduled_end_at: str | None = None
+    timezone: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class InterviewTaskListResponse(BaseModel):
+    job_id: str
+    count: int
+    items: list[InterviewTaskRow] = Field(default_factory=list)
+
+
+class InterviewTaskScheduleRequest(BaseModel):
+    starts_at: str
+    ends_at: str
+    interviewer: str | None = None
+    notes: str | None = None
+    timezone: str | None = None
+    meeting_link: str | None = None

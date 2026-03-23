@@ -144,15 +144,35 @@ def ingestion_status_handler(job_id: str, db: Session = Depends(get_db)) -> dict
     if not get_job(db, parsed_id):
         raise HTTPException(status_code=404, detail="Job not found")
 
-    rows = db.execute(
-        select(Resume.parse_status)
+    status_rows = db.execute(
+        select(Resume.id, Resume.parse_status)
         .join(JobResume, JobResume.resume_id == Resume.id)
         .where(JobResume.job_id == parsed_id)
     ).all()
 
-    total_uploaded = len(rows)
-    queued = sum(1 for (status,) in rows if status == "pending")
-    queue_failed = sum(1 for (status,) in rows if status == "failed")
+    queue_failure_rows = db.execute(
+        select(AuditLog.payload)
+        .where(
+            AuditLog.entity_type == "job",
+            AuditLog.entity_id == parsed_id,
+            AuditLog.event_type == "resume_ingestion_queue_failed",
+        )
+    ).all()
+
+    failed_resume_ids: set[str] = set()
+    for (payload,) in queue_failure_rows:
+        if isinstance(payload, dict):
+            resume_id = payload.get("resume_id")
+            if isinstance(resume_id, str) and resume_id:
+                failed_resume_ids.add(resume_id)
+
+    total_uploaded = len(status_rows)
+    queued = sum(
+        1
+        for (resume_id, status) in status_rows
+        if status == "pending" and str(resume_id) not in failed_resume_ids
+    )
+    queue_failed = len(failed_resume_ids)
 
     return {
         "job_id": job_id,

@@ -6,6 +6,8 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from urllib.parse import urlencode
 
 from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
@@ -28,6 +30,7 @@ ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "false").lower() == "true"
 LLM_SCORE_WEIGHT = float(os.getenv("LLM_SCORE_WEIGHT", "0.2"))
 LLM_CONFIDENCE_WEIGHT = float(os.getenv("LLM_CONFIDENCE_WEIGHT", "0.3"))
 GPT_ONLY_RANKING = os.getenv("GPT_ONLY_RANKING", "true").lower() == "true"
+INTERVIEW_TASK_EVENT = "interview_task_upsert"
 
 
 @dataclass
@@ -790,6 +793,13 @@ def add_candidate_action(
         created_by=created_by,
     )
     db.add(row)
+    if action == "interviewed":
+        ensure_interview_task_for_candidate(
+            db,
+            job_id=job_id,
+            candidate_id=candidate_id,
+            created_by=created_by,
+        )
     db.commit()
     db.refresh(row)
     return row
@@ -804,3 +814,287 @@ def clear_candidate_action(db: Session, *, job_id: uuid.UUID, candidate_id: uuid
     )
     db.commit()
     return result.rowcount or 0
+
+
+def _safe_uuid(value: object) -> uuid.UUID | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
+def _to_iso(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
+    return None
+
+
+def _to_utc_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _google_calendar_url(
+    *,
+    title: str,
+    details: str,
+    start_at_utc: datetime,
+    end_at_utc: datetime,
+    location: str | None,
+) -> str:
+    query = {
+        "action": "TEMPLATE",
+        "text": title.strip() or "Interview",
+        "details": details.strip() or "Interview session",
+        "dates": f"{start_at_utc.strftime('%Y%m%dT%H%M%SZ')}/{end_at_utc.strftime('%Y%m%dT%H%M%SZ')}",
+    }
+    if location and location.strip():
+        query["location"] = location.strip()
+    return f"https://calendar.google.com/calendar/render?{urlencode(query)}"
+
+
+def _read_interview_task_snapshots(db: Session, *, job_id: uuid.UUID) -> list[dict]:
+    logs = (
+        db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.entity_type == "job",
+                AuditLog.entity_id == job_id,
+                AuditLog.event_type == INTERVIEW_TASK_EVENT,
+            )
+            .order_by(AuditLog.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    snapshots_by_id: dict[str, dict] = {}
+    for log in logs:
+        payload = log.payload if isinstance(log.payload, dict) else {}
+        task_id = payload.get("task_id")
+        candidate_id = payload.get("candidate_id")
+        if not isinstance(task_id, str) or not isinstance(candidate_id, str):
+            continue
+
+        existing = snapshots_by_id.get(task_id)
+        if not existing:
+            snapshots_by_id[task_id] = {
+                "task_id": task_id,
+                "candidate_id": candidate_id,
+                "status": str(payload.get("status") or "pending"),
+                "title": str(payload.get("title") or "Interview"),
+                "interviewer": payload.get("interviewer"),
+                "notes": payload.get("notes"),
+                "meeting_provider": payload.get("meeting_provider") or "google_meet",
+                "meeting_link": payload.get("meeting_link"),
+                "google_calendar_url": payload.get("google_calendar_url"),
+                "scheduled_start_at": payload.get("scheduled_start_at"),
+                "scheduled_end_at": payload.get("scheduled_end_at"),
+                "timezone": payload.get("timezone") or "UTC",
+                "created_at": _to_iso(log.created_at),
+                "updated_at": _to_iso(log.created_at),
+            }
+            continue
+
+        existing.update(
+            {
+                "candidate_id": candidate_id,
+                "status": str(payload.get("status") or existing.get("status") or "pending"),
+                "title": payload.get("title") or existing.get("title") or "Interview",
+                "interviewer": payload.get("interviewer"),
+                "notes": payload.get("notes"),
+                "meeting_provider": payload.get("meeting_provider") or existing.get("meeting_provider") or "google_meet",
+                "meeting_link": payload.get("meeting_link"),
+                "google_calendar_url": payload.get("google_calendar_url"),
+                "scheduled_start_at": payload.get("scheduled_start_at"),
+                "scheduled_end_at": payload.get("scheduled_end_at"),
+                "timezone": payload.get("timezone") or existing.get("timezone") or "UTC",
+                "updated_at": _to_iso(log.created_at),
+            }
+        )
+
+    return sorted(
+        snapshots_by_id.values(),
+        key=lambda item: item.get("updated_at") or item.get("created_at") or "",
+        reverse=True,
+    )
+
+
+def ensure_interview_task_for_candidate(
+    db: Session,
+    *,
+    job_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    created_by: uuid.UUID | None = None,
+) -> dict:
+    current = [
+        item
+        for item in _read_interview_task_snapshots(db, job_id=job_id)
+        if item.get("candidate_id") == str(candidate_id)
+    ]
+    if current and str(current[0].get("status") or "").lower() in {"pending", "scheduled"}:
+        return current[0]
+
+    task_id = str(uuid.uuid4())
+    payload = {
+        "task_id": task_id,
+        "candidate_id": str(candidate_id),
+        "status": "pending",
+        "title": "Schedule interview",
+        "interviewer": None,
+        "notes": None,
+        "meeting_provider": "google_meet",
+        "meeting_link": None,
+        "google_calendar_url": None,
+        "scheduled_start_at": None,
+        "scheduled_end_at": None,
+        "timezone": "UTC",
+    }
+    db.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            entity_type="job",
+            entity_id=job_id,
+            event_type=INTERVIEW_TASK_EVENT,
+            payload=payload,
+            created_by=created_by,
+        )
+    )
+    return payload
+
+
+def list_interview_tasks(db: Session, *, job_id: uuid.UUID) -> list[dict]:
+    snapshots = _read_interview_task_snapshots(db, job_id=job_id)
+    candidate_ids = [
+        parsed
+        for parsed in (_safe_uuid(item.get("candidate_id")) for item in snapshots)
+        if parsed is not None
+    ]
+    candidate_rows = (
+        db.execute(select(Candidate).where(Candidate.id.in_(candidate_ids))).scalars().all()
+        if candidate_ids
+        else []
+    )
+    candidate_by_id = {str(candidate.id): candidate for candidate in candidate_rows}
+
+    output: list[dict] = []
+    for item in snapshots:
+        candidate_id = str(item.get("candidate_id") or "")
+        candidate = candidate_by_id.get(candidate_id)
+        output.append(
+            {
+                "task_id": str(item.get("task_id") or ""),
+                "candidate_id": candidate_id,
+                "candidate_name": candidate.full_name if candidate and candidate.full_name else "Unknown Candidate",
+                "candidate_email": candidate.primary_email if candidate else None,
+                "status": str(item.get("status") or "pending"),
+                "title": str(item.get("title") or "Schedule interview"),
+                "interviewer": item.get("interviewer"),
+                "notes": item.get("notes"),
+                "meeting_provider": str(item.get("meeting_provider") or "google_meet"),
+                "meeting_link": item.get("meeting_link"),
+                "google_calendar_url": item.get("google_calendar_url"),
+                "scheduled_start_at": item.get("scheduled_start_at"),
+                "scheduled_end_at": item.get("scheduled_end_at"),
+                "timezone": str(item.get("timezone") or "UTC"),
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+            }
+        )
+    return output
+
+
+def schedule_interview_task(
+    db: Session,
+    *,
+    job_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    starts_at: str,
+    ends_at: str,
+    interviewer: str | None,
+    notes: str | None,
+    timezone_name: str | None,
+    meeting_link: str | None,
+    created_by: uuid.UUID | None = None,
+) -> dict:
+    start_at = _to_utc_datetime(starts_at)
+    end_at = _to_utc_datetime(ends_at)
+    if not start_at or not end_at:
+        raise ValueError("Invalid interview start/end date format")
+    if end_at <= start_at:
+        raise ValueError("Interview end must be after interview start")
+
+    existing_tasks = list_interview_tasks(db, job_id=job_id)
+    current = next((item for item in existing_tasks if item["candidate_id"] == str(candidate_id)), None)
+    if not current:
+        current = ensure_interview_task_for_candidate(
+            db,
+            job_id=job_id,
+            candidate_id=candidate_id,
+            created_by=created_by,
+        )
+
+    candidate_row = db.get(Candidate, candidate_id)
+    candidate_name = candidate_row.full_name if candidate_row and candidate_row.full_name else "Candidate"
+    title = f"Interview: {candidate_name}"
+    details_parts = [
+        f"Candidate: {candidate_name}",
+        f"Interviewer: {interviewer.strip() if interviewer else 'TBD'}",
+    ]
+    if notes and notes.strip():
+        details_parts.append(f"Notes: {notes.strip()}")
+
+    calendar_url = _google_calendar_url(
+        title=title,
+        details="\n".join(details_parts),
+        start_at_utc=start_at,
+        end_at_utc=end_at,
+        location=meeting_link.strip() if meeting_link else "Google Meet",
+    )
+
+    payload = {
+        "task_id": str(current.get("task_id")),
+        "candidate_id": str(candidate_id),
+        "status": "scheduled",
+        "title": "Interview scheduled",
+        "interviewer": interviewer.strip() if interviewer else None,
+        "notes": notes.strip() if notes else None,
+        "meeting_provider": "google_meet",
+        "meeting_link": meeting_link.strip() if meeting_link else None,
+        "google_calendar_url": calendar_url,
+        "scheduled_start_at": start_at.isoformat(),
+        "scheduled_end_at": end_at.isoformat(),
+        "timezone": timezone_name.strip() if timezone_name else "UTC",
+    }
+    db.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            entity_type="job",
+            entity_id=job_id,
+            event_type=INTERVIEW_TASK_EVENT,
+            payload=payload,
+            created_by=created_by,
+        )
+    )
+    db.commit()
+
+    refreshed = list_interview_tasks(db, job_id=job_id)
+    matched = next((item for item in refreshed if item["task_id"] == payload["task_id"]), None)
+    if matched:
+        return matched
+    return {
+        **payload,
+        "candidate_name": candidate_name,
+        "candidate_email": candidate_row.primary_email if candidate_row else None,
+        "created_at": None,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }

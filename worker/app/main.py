@@ -26,7 +26,12 @@ from app.llm_parse import (
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 INGESTION_QUEUE_KEY = os.getenv("INGESTION_QUEUE_KEY", "resume_ingestion_queue")
-WORKER_DATABASE_URL = os.getenv("WORKER_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/ats")
+_raw_worker_db_url = (
+    os.getenv("WORKER_DATABASE_URL")
+    or os.getenv("DATABASE_URL")
+    or "postgresql://postgres:postgres@localhost:5432/ats"
+)
+WORKER_DATABASE_URL = _raw_worker_db_url.replace("postgresql+psycopg://", "postgresql://")
 ENABLE_LLM_PARSE = os.getenv("ENABLE_LLM_PARSE", "false").lower() == "true"
 LLM_PARSE_ONLY = os.getenv("LLM_PARSE_ONLY", "false").lower() == "true"
 USE_DOCLING_PARSER = os.getenv("USE_DOCLING_PARSER", "true").lower() == "true"

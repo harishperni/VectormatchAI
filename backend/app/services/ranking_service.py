@@ -31,6 +31,7 @@ LLM_SCORE_WEIGHT = float(os.getenv("LLM_SCORE_WEIGHT", "0.2"))
 LLM_CONFIDENCE_WEIGHT = float(os.getenv("LLM_CONFIDENCE_WEIGHT", "0.3"))
 GPT_ONLY_RANKING = os.getenv("GPT_ONLY_RANKING", "true").lower() == "true"
 INTERVIEW_TASK_EVENT = "interview_task_upsert"
+INTERVIEW_TASK_STATUSES = {"pending", "scheduled", "completed", "cancelled"}
 
 
 @dataclass
@@ -1013,6 +1014,26 @@ def list_interview_tasks(db: Session, *, job_id: uuid.UUID) -> list[dict]:
     return output
 
 
+def _get_current_interview_task(
+    db: Session,
+    *,
+    job_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> dict:
+    current = next(
+        (item for item in list_interview_tasks(db, job_id=job_id) if item["candidate_id"] == str(candidate_id)),
+        None,
+    )
+    if current:
+        return current
+    return ensure_interview_task_for_candidate(
+        db,
+        job_id=job_id,
+        candidate_id=candidate_id,
+        created_by=None,
+    )
+
+
 def schedule_interview_task(
     db: Session,
     *,
@@ -1033,15 +1054,7 @@ def schedule_interview_task(
     if end_at <= start_at:
         raise ValueError("Interview end must be after interview start")
 
-    existing_tasks = list_interview_tasks(db, job_id=job_id)
-    current = next((item for item in existing_tasks if item["candidate_id"] == str(candidate_id)), None)
-    if not current:
-        current = ensure_interview_task_for_candidate(
-            db,
-            job_id=job_id,
-            candidate_id=candidate_id,
-            created_by=created_by,
-        )
+    current = _get_current_interview_task(db, job_id=job_id, candidate_id=candidate_id)
 
     candidate_row = db.get(Candidate, candidate_id)
     candidate_name = candidate_row.full_name if candidate_row and candidate_row.full_name else "Candidate"
@@ -1096,5 +1109,61 @@ def schedule_interview_task(
         "candidate_name": candidate_name,
         "candidate_email": candidate_row.primary_email if candidate_row else None,
         "created_at": None,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def set_interview_task_status(
+    db: Session,
+    *,
+    job_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    status: str,
+    notes: str | None,
+    created_by: uuid.UUID | None = None,
+) -> dict:
+    normalized = status.strip().lower()
+    if normalized not in INTERVIEW_TASK_STATUSES:
+        raise ValueError("Invalid task status")
+
+    current = _get_current_interview_task(db, job_id=job_id, candidate_id=candidate_id)
+    payload = {
+        "task_id": str(current.get("task_id")),
+        "candidate_id": str(candidate_id),
+        "status": normalized,
+        "title": current.get("title") or "Schedule interview",
+        "interviewer": current.get("interviewer"),
+        "notes": notes.strip() if notes and notes.strip() else current.get("notes"),
+        "meeting_provider": current.get("meeting_provider") or "google_meet",
+        "meeting_link": current.get("meeting_link"),
+        "google_calendar_url": current.get("google_calendar_url"),
+        "scheduled_start_at": current.get("scheduled_start_at"),
+        "scheduled_end_at": current.get("scheduled_end_at"),
+        "timezone": current.get("timezone") or "UTC",
+    }
+    db.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            entity_type="job",
+            entity_id=job_id,
+            event_type=INTERVIEW_TASK_EVENT,
+            payload=payload,
+            created_by=created_by,
+        )
+    )
+    db.commit()
+
+    refreshed = list_interview_tasks(db, job_id=job_id)
+    matched = next((item for item in refreshed if item["task_id"] == payload["task_id"]), None)
+    if matched:
+        return matched
+
+    candidate_row = db.get(Candidate, candidate_id)
+    candidate_name = candidate_row.full_name if candidate_row and candidate_row.full_name else "Candidate"
+    return {
+        **payload,
+        "candidate_name": candidate_name,
+        "candidate_email": candidate_row.primary_email if candidate_row else None,
+        "created_at": current.get("created_at"),
         "updated_at": datetime.now(UTC).isoformat(),
     }

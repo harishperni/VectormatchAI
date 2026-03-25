@@ -21,6 +21,21 @@ function defaultStartLocal(): string {
   return now.toISOString().slice(0, 16);
 }
 
+function toDate(value?: string | null): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function statusPillClass(status: string): string {
+  const normalized = status.toLowerCase();
+  if (normalized === "scheduled") return "bg-sky-100 text-sky-800";
+  if (normalized === "completed") return "bg-emerald-100 text-emerald-800";
+  if (normalized === "cancelled") return "bg-rose-100 text-rose-800";
+  return "bg-amber-100 text-amber-800";
+}
+
 export default function InterviewTasksTab({ jobId }: { jobId: string }) {
   const [tasks, setTasks] = useState<InterviewTask[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,6 +48,26 @@ export default function InterviewTasksTab({ jobId }: { jobId: string }) {
     () => tasks.filter((task) => (task.status || "").toLowerCase() === "pending").length,
     [tasks]
   );
+  const dueSoonCount = useMemo(() => {
+    const now = Date.now();
+    const limit = now + (24 * 60 * 60 * 1000);
+    return tasks.filter((task) => {
+      if ((task.status || "").toLowerCase() !== "scheduled") return false;
+      const start = toDate(task.scheduled_start_at);
+      if (!start) return false;
+      const ts = start.getTime();
+      return ts >= now && ts <= limit;
+    }).length;
+  }, [tasks]);
+  const overdueCount = useMemo(() => {
+    const now = Date.now();
+    return tasks.filter((task) => {
+      if ((task.status || "").toLowerCase() !== "scheduled") return false;
+      const end = toDate(task.scheduled_end_at);
+      if (!end) return false;
+      return end.getTime() < now;
+    }).length;
+  }, [tasks]);
 
   async function loadTasks() {
     setLoading(true);
@@ -125,6 +160,30 @@ export default function InterviewTasksTab({ jobId }: { jobId: string }) {
     }
   }
 
+  async function updateTaskStatus(task: InterviewTask, action: "complete" | "cancel" | "reopen") {
+    const actionLabel = action === "complete" ? "completing" : action === "cancel" ? "cancelling" : "reopening";
+    setMessage(`${actionLabel} task for ${task.candidate_name}...`);
+    try {
+      const response = await fetch(
+        `/api/jobs/${jobId}/tasks/interviews/${task.candidate_id}/status`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        }
+      );
+      const payload = await response.json();
+      if (!response.ok) {
+        setMessage(payload?.detail ?? "Could not update task status.");
+        return;
+      }
+      setMessage(`Task updated for ${task.candidate_name}.`);
+      await loadTasks();
+    } catch {
+      setMessage("Could not update task status.");
+    }
+  }
+
   return (
     <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <header className="flex flex-wrap items-center justify-between gap-2">
@@ -137,6 +196,12 @@ export default function InterviewTasksTab({ jobId }: { jobId: string }) {
         <div className="flex items-center gap-2">
           <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
             Pending: {pendingCount}
+          </span>
+          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-semibold text-sky-800">
+            Due &lt;24h: {dueSoonCount}
+          </span>
+          <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-800">
+            Overdue: {overdueCount}
           </span>
           <button
             onClick={loadTasks}
@@ -166,14 +231,31 @@ export default function InterviewTasksTab({ jobId }: { jobId: string }) {
             meetingLink: task.meeting_link ?? "",
           };
           const isScheduled = (task.status || "").toLowerCase() === "scheduled";
+          const isCompleted = (task.status || "").toLowerCase() === "completed";
+          const isCancelled = (task.status || "").toLowerCase() === "cancelled";
+          const isClosed = isCompleted || isCancelled;
+          const startDate = toDate(task.scheduled_start_at);
+          const endDate = toDate(task.scheduled_end_at);
+          const now = Date.now();
+          const dueSoon = isScheduled && !!startDate && startDate.getTime() >= now && startDate.getTime() <= now + (24 * 60 * 60 * 1000);
+          const overdue = isScheduled && !!endDate && endDate.getTime() < now;
           return (
             <article key={task.task_id} className="rounded-xl border border-slate-200 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="text-base font-semibold text-slate-900">{task.candidate_name}</p>
-                  <p className="text-xs text-slate-500">
-                    {task.candidate_email || "No email on profile"} • Status: {task.status}
-                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                    <span className="text-slate-500">{task.candidate_email || "No email on profile"}</span>
+                    <span className={`rounded-full px-2 py-0.5 font-semibold ${statusPillClass(task.status || "pending")}`}>
+                      {task.status}
+                    </span>
+                    {dueSoon ? (
+                      <span className="rounded-full bg-sky-100 px-2 py-0.5 font-semibold text-sky-800">Due soon</span>
+                    ) : null}
+                    {overdue ? (
+                      <span className="rounded-full bg-rose-100 px-2 py-0.5 font-semibold text-rose-800">Overdue</span>
+                    ) : null}
+                  </div>
                 </div>
                 {task.google_calendar_url ? (
                   <a
@@ -196,28 +278,33 @@ export default function InterviewTasksTab({ jobId }: { jobId: string }) {
                   type="datetime-local"
                   value={draft.startsAt}
                   onChange={(event) => updateDraft(task.candidate_id, { startsAt: event.target.value })}
+                  disabled={isClosed}
                   className="rounded-md border border-slate-300 px-2 py-1.5 text-sm"
                 />
                 <input
                   value={draft.durationMin}
                   onChange={(event) => updateDraft(task.candidate_id, { durationMin: event.target.value })}
                   placeholder="Duration (min)"
+                  disabled={isClosed}
                   className="rounded-md border border-slate-300 px-2 py-1.5 text-sm"
                 />
                 <input
                   value={draft.interviewer}
                   onChange={(event) => updateDraft(task.candidate_id, { interviewer: event.target.value })}
                   placeholder="Interviewer"
+                  disabled={isClosed}
                   className="rounded-md border border-slate-300 px-2 py-1.5 text-sm"
                 />
                 <input
                   value={draft.meetingLink}
                   onChange={(event) => updateDraft(task.candidate_id, { meetingLink: event.target.value })}
                   placeholder="Google Meet URL (optional)"
+                  disabled={isClosed}
                   className="rounded-md border border-slate-300 px-2 py-1.5 text-sm"
                 />
                 <button
                   onClick={() => schedule(task)}
+                  disabled={isClosed}
                   className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white"
                 >
                   {isScheduled ? "Reschedule" : "Schedule"}
@@ -227,8 +314,34 @@ export default function InterviewTasksTab({ jobId }: { jobId: string }) {
                 value={draft.notes}
                 onChange={(event) => updateDraft(task.candidate_id, { notes: event.target.value })}
                 placeholder="Interview notes"
+                disabled={isClosed}
                 className="mt-2 min-h-16 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
               />
+              <div className="mt-2 flex flex-wrap gap-2">
+                {!isClosed ? (
+                  <>
+                    <button
+                      onClick={() => updateTaskStatus(task, "complete")}
+                      className="rounded border border-emerald-300 px-2 py-1 text-xs font-semibold text-emerald-700"
+                    >
+                      Mark Complete
+                    </button>
+                    <button
+                      onClick={() => updateTaskStatus(task, "cancel")}
+                      className="rounded border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700"
+                    >
+                      Cancel Task
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => updateTaskStatus(task, "reopen")}
+                    className="rounded border border-amber-300 px-2 py-1 text-xs font-semibold text-amber-700"
+                  >
+                    Reopen Task
+                  </button>
+                )}
+              </div>
               <p className="mt-2 text-[11px] text-slate-500">
                 Tip: after scheduling, a Google Calendar draft opens where HR can add Google Meet in one click.
               </p>

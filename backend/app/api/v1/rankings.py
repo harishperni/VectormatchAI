@@ -14,6 +14,7 @@ from app.schemas.rankings import (
     InterviewTaskListResponse,
     InterviewTaskRow,
     InterviewTaskScheduleRequest,
+    InterviewTaskStatusRequest,
     RankingDiffRow,
     RankingListResponse,
 )
@@ -33,6 +34,7 @@ from app.services.ranking_service import (
     get_rankings_for_job,
     run_ranking_for_job,
     schedule_interview_task,
+    set_interview_task_status,
 )
 
 router = APIRouter()
@@ -382,6 +384,47 @@ def schedule_interview(
             notes=payload.notes,
             timezone_name=payload.timezone,
             meeting_link=payload.meeting_link,
+            created_by=DEFAULT_USER_ID,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return InterviewTaskRow(**row)
+
+
+@router.post("/{job_id}/tasks/interviews/{candidate_id}/status", response_model=InterviewTaskRow)
+def update_interview_task_status(
+    job_id: str,
+    candidate_id: str,
+    payload: InterviewTaskStatusRequest,
+    db: Session = Depends(get_db),
+) -> InterviewTaskRow:
+    action = payload.action.strip().lower()
+    action_to_status = {
+        "complete": "completed",
+        "cancel": "cancelled",
+        "reopen": "pending",
+    }
+    status = action_to_status.get(action)
+    if not status:
+        raise HTTPException(status_code=400, detail="Invalid action. Use complete, cancel, or reopen.")
+
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+        parsed_candidate_id = uuid.UUID(candidate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid UUID format") from exc
+
+    if not get_job(db, parsed_job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    try:
+        row = set_interview_task_status(
+            db,
+            job_id=parsed_job_id,
+            candidate_id=parsed_candidate_id,
+            status=status,
+            notes=payload.notes,
             created_by=DEFAULT_USER_ID,
         )
     except ValueError as exc:

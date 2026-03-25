@@ -124,3 +124,8 @@ class InterviewTaskScheduleRequest(BaseModel):
     notes: str | None = None
     timezone: str | None = None
     meeting_link: str | None = None
+
+
+class InterviewTaskStatusRequest(BaseModel):
+    action: str
+    notes: str | None = None

@@ -8,6 +8,7 @@ import Link from "next/link";
 import CandidateReviewWorkspace from "@/components/candidate-review-workspace";
 import InterviewTasksTab from "@/components/interview-tasks-tab";
 import ParsedResumesTable from "@/components/parsed-resumes-table";
+import QualityEvaluationTab from "@/components/quality-evaluation-tab";
 import ResumeUploadPanel from "@/components/resume-upload-panel";
 import type { ParsedResumeRow, RankingRow } from "@/lib/api";
 
@@ -23,7 +24,7 @@ export default function JobWorkspace({
   const [localRankings, setLocalRankings] = useState<RankingRow[]>(rankings);
   const [localResumes, setLocalResumes] = useState<ParsedResumeRow[]>(resumes);
   const [showPipeline, setShowPipeline] = useState(false);
-  const [activeTab, setActiveTab] = useState<"workspace" | "tasks">("workspace");
+  const [activeTab, setActiveTab] = useState<"workspace" | "tasks" | "quality">("workspace");
   const storageKey = `ats:job:${jobId}:showKanban`;
   const tabStorageKey = `ats:job:${jobId}:activeTab`;
   const [refreshing, setRefreshing] = useState(false);
@@ -36,8 +37,8 @@ export default function JobWorkspace({
         setShowPipeline(true);
       }
       const savedTab = window.localStorage.getItem(tabStorageKey);
-      if (savedTab === "tasks") {
-        setActiveTab("tasks");
+      if (savedTab === "tasks" || savedTab === "quality") {
+        setActiveTab(savedTab);
       }
     } catch {
       // ignore storage errors
@@ -111,7 +112,7 @@ export default function JobWorkspace({
         <div>
           <p className="text-xs uppercase tracking-wide text-slate-500">Workspace</p>
           <p className="text-sm text-slate-600">
-            View: {activeTab === "tasks" ? "Interview Tasks" : showPipeline ? "Kanban + Table" : "Table only"}
+            View: {activeTab === "tasks" ? "Interview Tasks" : activeTab === "quality" ? "Quality Metrics" : showPipeline ? "Kanban + Table" : "Table only"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -150,6 +151,23 @@ export default function JobWorkspace({
             Tasks
           </button>
           <button
+            onClick={() => {
+              setActiveTab("quality");
+              try {
+                window.localStorage.setItem(tabStorageKey, "quality");
+              } catch {
+                // ignore storage errors
+              }
+            }}
+            className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+              activeTab === "quality"
+                ? "border-slate-900 bg-slate-900 text-white"
+                : "border-slate-300 bg-white text-slate-700"
+            }`}
+          >
+            Quality
+          </button>
+          <button
             onClick={() =>
               setShowPipeline((prev) => {
                 const next = !prev;
@@ -183,6 +201,8 @@ export default function JobWorkspace({
 
       {activeTab === "tasks" ? (
         <InterviewTasksTab jobId={jobId} />
+      ) : activeTab === "quality" ? (
+        <QualityEvaluationTab jobId={jobId} />
       ) : (
         <>
           {!showPipeline ? <ResumeUploadPanel jobId={jobId} /> : null}

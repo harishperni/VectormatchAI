@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "cases": [
+    {
+      "id": "sample-001",
+      "tags": ["clean_text", "software_engineering"],
+      "text": "John Doe\nAustin, TX\nEmail: john.doe@example.com\nPhone: (512) 555-1234\n\nSummary\nSenior software engineer with 7+ years of experience building cloud applications.\n\nWork Experience\nLead Software Engineer, Acme Corp\nJan 2020 - Present\nBuilt Python and React services on AWS.\n\nSoftware Engineer, Delta Apps\n2017 - 2019\nDeveloped Java and SQL data pipelines.\n\nSkills\nPython, React, AWS, SQL, Java\nEducation\nBachelor of Science in Computer Science",
+      "expected": {
+        "full_name": "John Doe",
+        "email": "john.doe@example.com",
+        "phone": "5125551234",
+        "candidate_location": "Austin, TX",
+        "current_last_job": "Lead Software Engineer",
+        "highest_degree": "Bachelor's",
+        "experience_years_final": 7.0,
+        "skills": ["python", "react", "aws", "sql", "java"]
+      }
+    },
+    {
+      "id": "sample-002",
+      "tags": ["consulting", "business_analyst"],
+      "text": "Jane Smith | Chicago, Illinois | jane.smith@consultingmail.com | +1 773 555 7777\n\nProfessional Summary\nBusiness analyst with over 5 years of experience in ServiceNow and ITSM implementations.\n\nProfessional Experience\nSenior Business Analyst, ConsultX\nFeb 2022 - Present\nServiceNow platform optimization and CMDB governance.\n\nBusiness Analyst, Bright Systems\n2019 - 2022\nRequirements analysis, reporting, SQL dashboards.\n\nSkills: ServiceNow, ITSM, CMDB, SQL, Excel\nEducation: Master of Science in Information Systems",
+      "expected": {
+        "full_name": "Jane Smith",
+        "email": "jane.smith@consultingmail.com",
+        "phone": "17735557777",
+        "candidate_location": "Chicago, IL",
+        "current_last_job": "Senior Business Analyst",
+        "highest_degree": "Master's",
+        "experience_years_final": 5.0,
+        "skills": ["servicenow", "itsm", "cmdb", "sql", "excel"]
+      }
+    }
+  ]
+}

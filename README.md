@@ -85,6 +85,24 @@
 - UI management:
   - Open `/jobs/{job_id}/evaluation`
   - Use `Golden Dataset Manager` to paste/save JSON directly
+- Ranking regression script:
+  - `cd backend && source .venv/bin/activate && python scripts/evaluate_ranking_regression.py --job-id <job_id> --top-k 5 --min-precision 0.4 --min-recall 0.4`
+
+## Resume parsing benchmark
+- Sample dataset:
+  - `worker/data/parsing/parsing_golden_sample.json`
+- Run heuristic parsing benchmark:
+  - `cd worker && source .venv/bin/activate && python scripts/evaluate_parsing.py --dataset data/parsing/parsing_golden_sample.json`
+- Run LLM-assisted parsing benchmark:
+  - `cd worker && source .venv/bin/activate && python scripts/evaluate_parsing.py --dataset data/parsing/parsing_golden_sample.json --enable-llm`
+- Optional threshold gating:
+  - `--min-overall-score 0.75`
+
+## Regression test scaffolding
+- Backend ranking metric unit tests:
+  - `cd backend && source .venv/bin/activate && python -m unittest discover -s tests -p 'test_ranking_metrics.py'`
+- Worker parsing metric unit tests:
+  - `cd worker && source .venv/bin/activate && python -m unittest discover -s tests -p 'test_parsing_metrics.py'`
 
 ## Embedding-based semantic ranking
 - Backend ranking now uses `sentence-transformers/all-MiniLM-L6-v2` cosine similarity.

@@ -11,8 +11,17 @@ export default function QualityEvaluationTab({ jobId }: { jobId: string }) {
   const [status, setStatus] = useState("Loading quality metrics...");
   const [loading, setLoading] = useState(false);
 
+  function normalizeTopK(raw: string): number {
+    const parsed = Number.parseInt((raw || "").trim(), 10);
+    if (!Number.isFinite(parsed)) {
+      return 5;
+    }
+    return Math.max(1, Math.min(50, parsed));
+  }
+
   async function loadEvaluation(currentTopK: string) {
-    const kValue = Math.max(1, Math.min(50, Number(currentTopK || 5)));
+    const kValue = normalizeTopK(currentTopK);
+    setTopK(String(kValue));
     setLoading(true);
     setStatus("Loading quality metrics...");
     try {

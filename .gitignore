@@ -15,6 +15,7 @@ __pycache__/
 
 # Local resume uploads
 backend/storage/resumes/
+worker/data/parsing/kaggle_parsing_eval_*.json
 
 # OS
 .DS_Store

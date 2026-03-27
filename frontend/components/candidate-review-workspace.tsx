@@ -363,12 +363,36 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
               </article>
 
               <article className="rounded-lg border border-slate-200 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Why Ranked</p>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                  {(explanation?.top_reasons?.length ? explanation.top_reasons : selectedRow?.top_reasons || []).map(
+                    (reason, idx) => (
+                      <li key={`reason-${idx}`}>{reason}</li>
+                    )
+                  )}
+                  {!(explanation?.top_reasons?.length || selectedRow?.top_reasons?.length) ? (
+                    <li>No explicit ranking reasons available yet.</li>
+                  ) : null}
+                </ul>
+              </article>
+
+              <article className="rounded-lg border border-slate-200 p-3">
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Score Breakdown</p>
                 <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2">
                   <p>Semantic: {explanation?.score_breakdown?.semantic ?? "N/A"}</p>
                   <p>Skill: {explanation?.score_breakdown?.skill ?? "N/A"}</p>
                   <p>Experience: {explanation?.score_breakdown?.experience ?? "N/A"}</p>
                   <p>Domain: {explanation?.score_breakdown?.domain ?? "N/A"}</p>
+                </div>
+              </article>
+
+              <article className="rounded-lg border border-slate-200 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Rubric Scores</p>
+                <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2">
+                  <p>Semantic Fit: {explanation?.rubric_scores?.semantic_fit ?? "N/A"}</p>
+                  <p>Skill Fit: {explanation?.rubric_scores?.skill_fit ?? "N/A"}</p>
+                  <p>Experience Fit: {explanation?.rubric_scores?.experience_fit ?? "N/A"}</p>
+                  <p>Domain Fit: {explanation?.rubric_scores?.domain_fit ?? "N/A"}</p>
                 </div>
               </article>
 
@@ -383,6 +407,29 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Missing Skills</p>
                 <p className="mt-2 text-sm text-slate-700">
                   {explanation?.missing_skills?.length ? explanation.missing_skills.join(", ") : "None"}
+                </p>
+              </article>
+
+              <article className="rounded-lg border border-slate-200 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Evidence Snippets</p>
+                <div className="mt-2 space-y-2">
+                  {explanation?.evidence_snippets?.length ? (
+                    explanation.evidence_snippets.map((snippet, idx) => (
+                      <div key={`evidence-${idx}`} className="rounded border border-slate-200 bg-slate-50 p-2 text-sm">
+                        <p className="font-semibold text-slate-800">{snippet.label}</p>
+                        <p className="mt-1 text-slate-700">{snippet.text}</p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-slate-700">No evidence snippets available yet.</p>
+                  )}
+                </div>
+              </article>
+
+              <article className="rounded-lg border border-slate-200 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Confidence Reasoning</p>
+                <p className="mt-2 text-sm text-slate-700">
+                  {explanation?.confidence_reasoning ?? "No confidence narrative available yet."}
                 </p>
               </article>
 

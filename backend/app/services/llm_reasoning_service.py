@@ -74,6 +74,140 @@ def _safe_json(value: str) -> dict[str, Any] | None:
         return None
 
 
+def _clamp_0_100(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, min(100.0, number)), 2)
+
+
+def _safe_string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    output: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        cleaned = " ".join(item.strip().split())
+        if cleaned:
+            output.append(cleaned)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _safe_evidence_snippets(value: Any, *, limit: int) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    snippets: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        claim = item.get("claim")
+        evidence = item.get("evidence")
+        if not isinstance(claim, str) or not isinstance(evidence, str):
+            continue
+        claim_text = " ".join(claim.strip().split())
+        evidence_text = " ".join(evidence.strip().split())
+        if not claim_text or not evidence_text:
+            continue
+        snippets.append(
+            {
+                "label": claim_text[:120],
+                "text": evidence_text[:320],
+            }
+        )
+        if len(snippets) >= limit:
+            break
+    return snippets
+
+
+def _normalize_reasoning_payload(
+    raw: dict[str, Any],
+    *,
+    resume_text: str,
+    matched_skills: list[str],
+    missing_skills: list[str],
+    base_score: float,
+) -> dict[str, Any]:
+    rubric = raw.get("rubric")
+    score_breakdown = raw.get("score_breakdown")
+    if not isinstance(rubric, dict):
+        rubric = {}
+    if not isinstance(score_breakdown, dict):
+        score_breakdown = {}
+
+    semantic = _clamp_0_100(rubric.get("semantic_fit"))
+    if semantic is None:
+        semantic = _clamp_0_100(score_breakdown.get("semantic"))
+    skill = _clamp_0_100(rubric.get("skill_fit"))
+    if skill is None:
+        skill = _clamp_0_100(score_breakdown.get("skill"))
+    experience = _clamp_0_100(rubric.get("experience_fit"))
+    if experience is None:
+        experience = _clamp_0_100(score_breakdown.get("experience"))
+    domain = _clamp_0_100(rubric.get("domain_fit"))
+    if domain is None:
+        domain = _clamp_0_100(score_breakdown.get("domain"))
+
+    normalized_breakdown = {
+        "semantic": semantic if semantic is not None else 0.0,
+        "skill": skill if skill is not None else 0.0,
+        "experience": experience if experience is not None else 0.0,
+        "domain": domain if domain is not None else 0.0,
+    }
+
+    reasons = _safe_string_list(raw.get("top_reasons") or raw.get("reasons"), limit=3)
+    strengths = _safe_string_list(raw.get("strengths"), limit=5)
+    summary = raw.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        summary = " | ".join(reasons) if reasons else "Reasoning generated from structured rubric."
+    summary = " ".join(summary.strip().split())[:600]
+
+    evidence_snippets = _safe_evidence_snippets(raw.get("evidence_spans"), limit=5)
+    if not evidence_snippets:
+        fallback = " ".join((resume_text or "").strip().split())[:280]
+        if fallback:
+            evidence_snippets = [{"label": "Resume evidence", "text": fallback}]
+
+    llm_score = _clamp_0_100(raw.get("overall_score"))
+    if llm_score is None:
+        llm_score = _clamp_0_100(raw.get("llm_score"))
+    if llm_score is None:
+        llm_score = _clamp_0_100(base_score)
+
+    llm_confidence = _clamp_0_100(raw.get("overall_confidence"))
+    if llm_confidence is None:
+        llm_confidence = _clamp_0_100(raw.get("llm_confidence"))
+
+    confidence_reasoning = raw.get("confidence_reasoning")
+    if not isinstance(confidence_reasoning, str):
+        confidence_reasoning = None
+
+    model_matched = _safe_string_list(raw.get("matched_skills"), limit=8)
+    model_missing = _safe_string_list(raw.get("missing_skills"), limit=8)
+
+    return {
+        "score_breakdown": normalized_breakdown,
+        "rubric_scores": {
+            "semantic_fit": normalized_breakdown["semantic"],
+            "skill_fit": normalized_breakdown["skill"],
+            "experience_fit": normalized_breakdown["experience"],
+            "domain_fit": normalized_breakdown["domain"],
+        },
+        "matched_skills": model_matched or matched_skills[:8],
+        "missing_skills": model_missing or missing_skills[:8],
+        "summary": summary,
+        "strengths": strengths,
+        "confidence_reasoning": confidence_reasoning,
+        "top_reasons": reasons,
+        "evidence_snippets": evidence_snippets,
+        "llm_score": llm_score,
+        "llm_confidence": llm_confidence,
+    }
+
+
 def generate_candidate_reasoning(
     *,
     job_title: str,
@@ -84,12 +218,20 @@ def generate_candidate_reasoning(
     score: float,
 ) -> dict[str, Any] | None:
     system_prompt = (
-        "You are an ATS recruiter copilot. Return only valid JSON with keys: "
-        "score_breakdown (object with semantic, skill, experience, domain as numbers 0-100), "
-        "matched_skills (array of strings), "
-        "summary (string), strengths (array of strings), missing_skills (array of strings), "
-        "confidence_reasoning (string), top_reasons (array of strings), "
-        "llm_score (number 0-100), llm_confidence (number 0-100)."
+        "You are an ATS recruiter copilot. Return only valid JSON. Use this exact shape:\n"
+        "{"
+        '"rubric":{"semantic_fit":0-100,"skill_fit":0-100,"experience_fit":0-100,"domain_fit":0-100},'
+        '"overall_score":0-100,'
+        '"overall_confidence":0-100,'
+        '"matched_skills":["..."],'
+        '"missing_skills":["..."],'
+        '"reasons":["..."],'
+        '"summary":"...",'
+        '"strengths":["..."],'
+        '"confidence_reasoning":"...",'
+        '"evidence_spans":[{"claim":"...","evidence":"verbatim snippet from resume text"}]'
+        "}\n"
+        "Rules: evidence must be grounded in the provided resume text; no fabricated claims."
     )
     user_prompt = (
         f"Job Title: {job_title}\n"
@@ -125,4 +267,10 @@ def generate_candidate_reasoning(
         logger.warning("[LLM_REASONING] OpenAI content was not valid JSON object")
         return None
     logger.info("[LLM_REASONING] Parsed reasoning payload successfully")
-    return parsed
+    return _normalize_reasoning_payload(
+        parsed,
+        resume_text=resume_text,
+        matched_skills=matched_skills,
+        missing_skills=missing_skills,
+        base_score=score,
+    )

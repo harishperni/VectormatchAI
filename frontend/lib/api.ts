@@ -96,6 +96,12 @@ export type CandidateExplanation = {
     experience: number;
     domain: number;
   };
+  rubric_scores?: {
+    semantic_fit?: number;
+    skill_fit?: number;
+    experience_fit?: number;
+    domain_fit?: number;
+  };
   matched_skills: string[];
   missing_skills: string[];
   evidence_snippets: ExplanationSnippet[];
@@ -111,6 +117,7 @@ export type CandidateExplanation = {
   llm_used?: boolean;
   confidence_reasoning?: string | null;
   strengths?: string[];
+  top_reasons?: string[];
 };
 
 export type InterviewTask = {

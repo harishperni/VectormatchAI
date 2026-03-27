@@ -31,6 +31,7 @@ class RankingListResponse(BaseModel):
 
 class ExplanationResponse(BaseModel):
     score_breakdown: dict[str, float]
+    rubric_scores: dict[str, float] = Field(default_factory=dict)
     matched_skills: list[str]
     missing_skills: list[str]
     evidence_snippets: list[dict[str, str]]
@@ -46,6 +47,7 @@ class ExplanationResponse(BaseModel):
     llm_used: bool = False
     confidence_reasoning: str | None = None
     strengths: list[str] = Field(default_factory=list)
+    top_reasons: list[str] = Field(default_factory=list)
 
 
 class CandidateActionRequest(BaseModel):

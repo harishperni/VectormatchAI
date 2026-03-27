@@ -23,7 +23,7 @@ from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_
 from app.services.location_service import distance_miles_between
 from app.services.scoring import weighted_score
 
-SCORING_VERSION = "score_v3_embedding_semantic_gpt_only"
+SCORING_VERSION = "score_v4_structured_rubric_evidence"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "false").lower() == "true"
@@ -465,6 +465,8 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         missing = llm_output.get("missing_skills")
         confidence_reasoning = llm_output.get("confidence_reasoning")
         top_reasons = llm_output.get("top_reasons")
+        rubric_scores = llm_output.get("rubric_scores")
+        evidence_snippets = llm_output.get("evidence_snippets")
 
         if isinstance(summary, str) and summary.strip():
             explanation_json["summary"] = summary.strip()
@@ -476,6 +478,21 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             explanation_json["confidence_reasoning"] = confidence_reasoning.strip()
         if isinstance(top_reasons, list):
             explanation_json["top_reasons"] = [str(item) for item in top_reasons][:3]
+        if isinstance(rubric_scores, dict):
+            explanation_json["rubric_scores"] = rubric_scores
+        if isinstance(evidence_snippets, list):
+            normalized_evidence: list[dict[str, str]] = []
+            for item in evidence_snippets:
+                if not isinstance(item, dict):
+                    continue
+                label = item.get("label")
+                text = item.get("text")
+                if isinstance(label, str) and isinstance(text, str) and label.strip() and text.strip():
+                    normalized_evidence.append(
+                        {"label": label.strip()[:120], "text": text.strip()[:320]}
+                    )
+            if normalized_evidence:
+                explanation_json["evidence_snippets"] = normalized_evidence[:5]
 
         llm_score = _to_float(llm_output.get("llm_score"))
         llm_confidence = _to_float(llm_output.get("llm_confidence"))
@@ -780,6 +797,7 @@ def get_candidate_explanation(
                 "domain": float(ranking.domain_score),
             },
         ),
+        "rubric_scores": payload.get("rubric_scores", {}),
         "matched_skills": payload.get("matched_skills", []),
         "missing_skills": payload.get("missing_skills", []),
         "evidence_snippets": payload.get("evidence_snippets", []),
@@ -795,6 +813,7 @@ def get_candidate_explanation(
         "llm_used": bool(payload.get("llm_used", False)),
         "confidence_reasoning": payload.get("confidence_reasoning"),
         "strengths": payload.get("strengths", []),
+        "top_reasons": payload.get("top_reasons", []),
     }
 
 

@@ -160,14 +160,14 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
   return (
     <>
       <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
           <div>
             <h2 className="font-heading text-xl font-semibold text-slate-900">Applicants</h2>
             <p className="text-xs text-slate-500">
               Showing {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, rows.length)} of {rows.length}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => saveBulkAction("shortlisted")}
               className="rounded border border-emerald-300 px-2 py-1 text-xs font-semibold text-emerald-700"
@@ -192,7 +192,7 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
 
         <div className="max-h-[68vh] overflow-y-auto">
           <div className="w-full overflow-x-auto">
-            <table className="w-full min-w-[1600px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[1320px] border-collapse text-left text-sm">
               <thead className="sticky top-0 z-20 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="border-b border-slate-200 px-3 py-2">
@@ -204,17 +204,17 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                     />
                   </th>
                   <th className="sticky left-0 z-30 border-b border-slate-200 bg-slate-50 px-3 py-2">Name</th>
-                  <th className="border-b border-slate-200 px-3 py-2">Type</th>
+                  <th className="hidden border-b border-slate-200 px-3 py-2 2xl:table-cell">Type</th>
                   <th className="border-b border-slate-200 px-3 py-2">Applied</th>
                   <th className="border-b border-slate-200 px-3 py-2">Stage</th>
-                  <th className="border-b border-slate-200 px-3 py-2">Step</th>
+                  <th className="hidden border-b border-slate-200 px-3 py-2 xl:table-cell">Step</th>
                   <th className="border-b border-slate-200 px-3 py-2">Current/Last Job</th>
                   <th className="border-b border-slate-200 px-3 py-2">Relevant Experience</th>
                   <th className="border-b border-slate-200 px-3 py-2">Highest Degree</th>
                   <th className="border-b border-slate-200 px-3 py-2">Distance</th>
                   <th className="border-b border-slate-200 px-3 py-2">Score</th>
-                  <th className="border-b border-slate-200 px-3 py-2">Audit</th>
-                  <th className="border-b border-slate-200 px-3 py-2">Actions</th>
+                  <th className="hidden border-b border-slate-200 px-3 py-2 lg:table-cell">Audit</th>
+                  <th className="sticky right-0 z-30 border-b border-slate-200 bg-slate-50 px-3 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -235,10 +235,10 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                     <td className="sticky left-0 z-10 bg-white px-3 py-2 font-semibold text-slate-900 group-hover:bg-slate-50">
                       {row.candidate_name}
                     </td>
-                    <td className="px-3 py-2 text-slate-700">{row.candidate_type ?? "External"}</td>
+                    <td className="hidden px-3 py-2 text-slate-700 2xl:table-cell">{row.candidate_type ?? "External"}</td>
                     <td className="px-3 py-2 text-slate-700">{formatApplied(row.applied_at)}</td>
-                  <td className="px-3 py-2 text-slate-700">{mapActionToStage(row.action_status)}</td>
-                  <td className="px-3 py-2 text-slate-700">{mapActionToStage(row.action_status)}</td>
+                    <td className="px-3 py-2 text-slate-700">{mapActionToStage(row.action_status)}</td>
+                    <td className="hidden px-3 py-2 text-slate-700 xl:table-cell">{mapActionToStage(row.action_status)}</td>
                     <td className="px-3 py-2 text-slate-700">{row.current_last_job ?? "-"}</td>
                     <td className="px-3 py-2 text-slate-700">
                       {row.experience_years !== null && row.experience_years !== undefined
@@ -246,13 +246,13 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                         : "-"}
                     </td>
                     <td className="px-3 py-2 text-slate-700">{row.highest_degree ?? "-"}</td>
-                  <td className="px-3 py-2 text-slate-700">
-                    {row.distance_miles !== null && row.distance_miles !== undefined
-                      ? `${Math.trunc(row.distance_miles)} miles`
-                      : "-"}
-                  </td>
+                    <td className="px-3 py-2 text-slate-700">
+                      {row.distance_miles !== null && row.distance_miles !== undefined
+                        ? `${Math.trunc(row.distance_miles)} miles`
+                        : "-"}
+                    </td>
                     <td className="px-3 py-2 font-semibold text-slate-900">{row.score}%</td>
-                    <td className="px-3 py-2 text-xs text-slate-700">
+                    <td className="hidden px-3 py-2 text-xs text-slate-700 lg:table-cell">
                       <div className="max-w-[260px] space-y-1">
                         <p className="font-medium text-slate-800">
                           {row.audit_summary ?? (row.audit_flags?.length ? row.audit_flags[0] : "OK")}
@@ -268,7 +268,7 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                         ) : null}
                       </div>
                     </td>
-                    <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                    <td className="sticky right-0 z-10 bg-white px-3 py-2 group-hover:bg-slate-50" onClick={(e) => e.stopPropagation()}>
                       <div className="flex flex-wrap gap-1">
                         <button
                           onClick={() => saveAction(row.candidate_id, "shortlisted")}

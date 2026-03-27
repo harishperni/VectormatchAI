@@ -130,7 +130,7 @@
 - Enable:
   - `OPENAI_API_KEY=<your_key>`
   - `ENABLE_LLM_PARSE=true`
-  - `OPENAI_PARSE_MODEL=gpt-4.1-mini`
+  - `OPENAI_PARSE_MODEL=ft:gpt-4.1-nano-2025-04-14:personal:resume-parser-v2nano500:DNmfuCvx`
   - `LLM_PARSE_TIMEOUT_SECONDS=30`
 - Force GPT-only parsing (no heuristic fields):
   - `LLM_PARSE_ONLY=true`

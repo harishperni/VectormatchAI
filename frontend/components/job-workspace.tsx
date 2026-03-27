@@ -106,6 +106,19 @@ export default function JobWorkspace({
     };
   }, [showPipeline]);
 
+  useEffect(() => {
+    const hasPending = localResumes.some((row) => (row.parse_status || "").toLowerCase() === "pending");
+    if (!hasPending) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshResumes();
+    }, 2000);
+
+    return () => window.clearInterval(timer);
+  }, [localResumes, jobId]);
+
   return (
     <div className="space-y-4">
       <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">

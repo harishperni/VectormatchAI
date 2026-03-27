@@ -16,312 +16,38 @@ logger = logging.getLogger(__name__)
 
 OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-LLM_PARSE_MODEL = os.getenv("OPENAI_PARSE_MODEL", "gpt-4.1-mini")
+LLM_PARSE_MODEL = os.getenv(
+    "OPENAI_PARSE_MODEL",
+    "ft:gpt-4.1-nano-2025-04-14:personal:resume-parser-v2nano500:DNmfuCvx",
+).strip()
 LLM_PARSE_TIMEOUT = int(os.getenv("LLM_PARSE_TIMEOUT_SECONDS", "60"))
 LLM_PARSE_MAX_RETRIES = int(os.getenv("LLM_PARSE_MAX_RETRIES", "2"))
 
-ATS_RESUME_SCHEMA_DESCRIPTION = """You are an enterprise-grade resume parsing engine used inside a modern Applicant Tracking System (ATS).
-
-Your task is to read raw resume text and convert it into a single structured JSON object for downstream recruiting workflows such as candidate search, ranking, filtering, and profile review.
-
-This parser is used in production. The output will be consumed by software systems, scoring engines, and recruiter dashboards. Accuracy, completeness, and schema compliance are more important than creativity.
-
-You must be robust to:
-- inconsistent formatting
-- broken line spacing
-- OCR noise
-- multi-page resumes
-- unusual section titles
-- mixed date formats
-- consulting/client-based resume structures
-- resumes with missing headings
-- resumes that place contact info, work history, and education in nonstandard positions
-
-Your goal is to recover the most accurate structured candidate profile possible from the resume text alone.
-
---------------------------------
-
-PRIMARY OBJECTIVE
-
-Extract a complete candidate profile from raw resume text and return valid JSON matching the exact schema.
-
-The parser must prioritize:
-1. factual extraction
-2. complete work history capture
-3. date normalization
-4. accurate skills and current role extraction
-5. consistent null handling when information is missing
-
---------------------------------
-
-STRICT OUTPUT RULES
-
-1. Output MUST be valid JSON only.
-2. Output MUST match the schema exactly.
-3. Do NOT output markdown.
-4. Do NOT output explanations.
-5. Do NOT invent information.
-6. If a value is not explicitly supported by the resume text, return null.
-7. If a list-based field has no items, return an empty array.
-8. Capture all work experience roles that appear to be professional employment.
-9. Do not omit older roles just because the resume is long.
-10. Do not extract fields from job descriptions, references, or unrelated boilerplate.
-11. Prefer precision over aggressive guessing.
-12. If information is ambiguous, return the best-supported value and add a short note in parser_notes.
-
---------------------------------
-
-FIELD EXTRACTION PRIORITIES
-
-When information conflicts across sections:
-- Prefer explicit contact/header information for name, email, phone, and location.
-- Prefer the most recent work experience section for current_last_job.
-- Prefer structured work history dates over narrative statements when calculating experience.
-- Prefer explicit summary-based years of experience only for experience_years_claimed.
-- Prefer calculated years for experience_years_final only when calculation is reliable and based on actual work roles.
-- Do not use education dates as professional experience.
-- Do not use project dates, certification dates, or volunteer dates as professional experience.
-
---------------------------------
-
-CONTACT INFORMATION EXTRACTION
-
-Extract if present:
-- full_name
-- email
-- phone
-- candidate_location
-- linkedin_url
-- github_url
-- portfolio_url
-
-Location normalization:
-- US example: City, ST
-- International example: City, Country
-
-Use the candidate's personal location only.
-Do NOT confuse company location, job location, client location, or employer office location with candidate_location.
-
---------------------------------
-
-DISTANCE FIELD
-
-distance_miles represents the approximate distance between the candidate's location and the target job location.
-
-Rules:
-- If job location is NOT provided in the input context, return null.
-- If candidate_location is missing, return null.
-- If both are present and can be reasonably compared, return a numeric miles value.
-- Do not guess distance without both locations.
-
---------------------------------
-
-PROFESSIONAL SUMMARY
-
-Extract professional_summary if present.
-
-Common headings:
-- Summary
-- Professional Summary
-- Profile
-- About Me
-- Career Summary
-
-If no summary exists, return null.
-
---------------------------------
-
-SKILLS EXTRACTION
-
-Extract a deduplicated list of meaningful skills from the resume.
-
-Include:
-- programming languages
-- frameworks
-- libraries
-- databases
-- BI / analytics tools
-- cloud platforms
-- DevOps tools
-- enterprise platforms
-- data tools
-- relevant professional tools
-- important soft skills if explicitly stated
-
-Do not include vague filler phrases unless they are clearly presented as skills.
-
---------------------------------
-
-LANGUAGES
-
-Extract spoken languages if explicitly mentioned.
-
---------------------------------
-
-WORK EXPERIENCE EXTRACTION
-
-Identify all professional work roles.
-
-Possible headings:
-- Work Experience
-- Professional Experience
-- Employment History
-- Career History
-- Industry Experience
-- Client Experience
-- Consulting Experience
-
-Ignore roles under:
-- Education
-- Projects
-- Certifications
-- Awards
-- Volunteer
-- Extracurriculars
-
-Each professional role must include:
-- company
-- title
-- location
-- start_date
-- end_date
-- is_current
-- employment_type
-- responsibilities
-- related_skills
-
-Responsibilities:
-- extract bullet points or narrative responsibility lines belonging to that role
-- keep them concise but factual
-
-related_skills:
-- extract technologies, tools, platforms, or methods specifically associated with that role
-
---------------------------------
-
-CLIENT / CONSULTING STRUCTURES
-
-For consulting resumes, preserve the real employer as company.
-
-If client information is present but not part of schema, do not invent a new top-level key.
-If needed, mention ambiguity briefly in parser_notes.
-
---------------------------------
-
-DATE NORMALIZATION
-
-Normalize dates to:
-- YYYY-MM
-- YYYY
-- null
-
-If ongoing:
-- is_current = true
-- end_date = null
-
-Recognize variants like:
-- Present
-- Current
-- Till Date
-- Till now
-- Ongoing
-
---------------------------------
-
-CURRENT LAST JOB
-
-Identify the most recent professional role.
-
-Return only the job title.
-Do not include the company name in current_last_job.
-
---------------------------------
-
-EDUCATION EXTRACTION
-
-Extract all education entries.
-
-Possible headings:
-- Education
-- Academic Background
-- Qualifications
-- Academic Qualifications
-
-Fields:
-- institution
-- degree
-- field_of_study
-- start_date
-- end_date
-- gpa
-- location
-
-highest_degree should represent the highest completed degree.
-
---------------------------------
-
-EXPERIENCE YEARS
-
-experience_years_claimed
-- Extract only if the resume explicitly states a total years-of-experience claim.
-- Do not extract unrelated year counts such as company history, industry age, or project duration not tied to candidate total experience.
-
-experience_years_calculated
-- Calculate based on professional work roles only.
-- Use start and end dates from experience_entries.
-- Avoid double counting overlapping jobs.
-- Exclude education, projects, certifications, and volunteer work.
-
-experience_years_final
-- Prefer calculated value if it is reliable.
-- If the resume explicitly claims total experience and the calculated value is weak or incomplete, use the claimed value.
-- If both exist and differ significantly, prefer the value best supported by the resume and mention the discrepancy in parser_notes.
-
---------------------------------
-
-RAW TEXT QUALITY
-
-Estimate raw_text_quality as one of:
-- high
-- medium
-- low
-
---------------------------------
-
-PARSER NOTES
-
-Add short notes when:
-- work history is ambiguous
-- dates are incomplete
-- section boundaries are unclear
-- candidate location is uncertain
-- claimed and calculated experience conflict
-- consulting/client structure required interpretation
-
-If no notes are needed, return an empty array.
-
---------------------------------
-
-CONFIDENCE SCORES
-
-Provide confidence values between 0 and 1 for:
-- full_name
-- email
-- phone
-- candidate_location
-- current_last_job
-- highest_degree
-- skills
-- experience_entries
-- experience_years_final
+ATS_RESUME_SCHEMA_DESCRIPTION_V2 = """You are an expert resume parser.
+
+Extract only information explicitly present in the resume text.
+Do not infer, guess, or invent missing information.
+If a field is not present, return null or [].
+Return only valid JSON matching the exact schema.
+
+Important rules:
+- Extract contact info only if explicitly present.
+- Extract skills from sections such as Skills, Key Skills, Technical Skills, Toolkit, Expertise.
+- Extract projects from sections such as Projects, Personal Projects, Side Projects, Selected Projects.
+- Keep URLs only if explicitly present in the resume text.
+- Keep certifications only if explicitly present in the resume text.
+- Do not add synthetic metadata, confidence scores, distances, or derived analytics.
+- current_last_job must be the most recent job title only.
+- highest_degree must align with the highest explicit degree found in education.
+- Extract only professional experience into experience_entries.
+- Keep achievements empty unless they are explicitly separated and clearly identifiable.
 """
 
-ATS_RESUME_OUTPUT_SCHEMA = """{
+ATS_RESUME_OUTPUT_SCHEMA_V2 = """{
   "full_name": null,
   "email": null,
   "phone": null,
   "candidate_location": null,
-  "distance_miles": null,
   "linkedin_url": null,
   "github_url": null,
   "portfolio_url": null,
@@ -348,118 +74,56 @@ ATS_RESUME_OUTPUT_SCHEMA = """{
       "location": null,
       "start_date": null,
       "end_date": null,
-      "is_current": false,
+      "is_current": null,
       "employment_type": null,
-      "responsibilities": [],
-      "related_skills": []
+      "description": null,
+      "skills_used": [],
+      "achievements": []
     }
   ],
-  "experience_years_claimed": null,
-  "experience_years_calculated": null,
-  "experience_years_final": null,
-  "raw_text_quality": null,
-  "parser_notes": [],
-  "field_confidence": {
-    "full_name": null,
-    "email": null,
-    "phone": null,
-    "candidate_location": null,
-    "current_last_job": null,
-    "highest_degree": null,
-    "skills": null,
-    "experience_entries": null,
-    "experience_years_final": null
-  }
+  "projects": [
+    {
+      "name": null,
+      "description": null,
+      "technologies": [],
+      "url": null
+    }
+  ],
+  "certifications": [
+    {
+      "name": null,
+      "issuer": null,
+      "date": null,
+      "credential_id": null
+    }
+  ],
+  "awards": [],
+  "volunteering": [],
+  "publications": []
 }"""
 
-WORK_START_PATTERN = re.compile(
-    r"^(work experience|professional experience|employment history|experience)\s*:?\s*$",
-    re.IGNORECASE,
-)
-
-WORK_END_PATTERN = re.compile(
-    r"^(education|certifications|projects|skills|publications|awards|activities)\s*:?\s*$",
-    re.IGNORECASE,
-)
-
-SECTION_EXCLUDE_HEADERS = re.compile(
-    r"^(skills|projects|certifications|education|publications|awards|activities)\b",
-    re.IGNORECASE,
-)
-
-JOB_HEADER_PATTERN = re.compile(
-    r"^(?P<company>.+?)\s*\|\s*(?P<title>.+?)$"
-)
-
-INLINE_JOB_PATTERN = re.compile(
-    r"^(?P<company>.+?)\s*\|\s*(?P<title>.+?)\s+(?P<location>[^|]+?)\s*\|\s*(?P<dates>.+)$",
-    re.IGNORECASE,
-)
-
-DATE_LOCATION_LINE_PATTERN = re.compile(
-    r"^(?P<location>.+?)\s*\|\s*(?P<dates>.+)$",
-    re.IGNORECASE,
-)
-COMPANY_LOCATION_DATE_LINE_PATTERN = re.compile(
-    r"^(?P<company>.+?)\s*:\s*(?P<location>.+?)\s+(?P<dates>(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December|19\d{2}|20\d{2}).+)$",
-    re.IGNORECASE,
-)
-CLIENT_LINE_PATTERN = re.compile(
-    r"^Client\s*:\s*(?P<company>.+?)\s{2,}(?P<dates>.+)$",
-    re.IGNORECASE,
-)
-ROLE_LINE_PATTERN = re.compile(r"^Role\s*:\s*(?P<title>.+)$", re.IGNORECASE)
-LOCATION_LABEL_PATTERN = re.compile(r"^Location\s*:\s*(?P<location>.+)$", re.IGNORECASE)
-
-DATE_RANGE_PATTERNS = [
-    re.compile(
-        r"(?P<smon>[A-Za-z]{3,9})[’'](?P<syr2>\d{2,4})\s*(?:-|–|—|to)\s*(?:(?P<emon>[A-Za-z]{3,9})[’'](?P<eyr2>\d{2,4})|(?P<ep>Present|Current|Now|Today|Till(?:\s+Date)?))",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?P<smon_ns>[A-Za-z]{3,9})(?P<syr_ns>\d{4})\s*(?:-|–|—|to)\s*(?:(?P<emon_ns>[A-Za-z]{3,9})(?P<eyr_ns>\d{4})|(?P<ep_ns>Present|Current|Now|Today|Till(?:\s+Date)?))",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?P<sy>\d{4})[-/.](?P<sm>\d{1,2})\s*[-–—to]+\s*(?:(?P<ey>\d{4})[-/.](?P<em>\d{1,2})|(?P<ep>Present|Current|Now|Today))",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?P<smon>[A-Za-z]{3,9})\s+(?P<syr>\d{4})\s*[-–—to]+\s*(?P<emon>[A-Za-z]{3,9}|Present|Current|Now|Today|Till(?:\s+Date)?)\s*(?P<eyr>\d{4})?",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?P<smo>\d{1,2})/(?P<syr>\d{4})\s*[-–—to]+\s*(?P<emo>\d{1,2}|Present|Current|Now|Today|Till(?:\s+Date)?)\s*/?(?P<eyr>\d{4})?",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?P<syr>\d{4})\s*[-–—to]+\s*(?P<eyr>\d{4}|Present|Current|Now|Today|Till(?:\s+Date)?)",
-        re.IGNORECASE,
-    ),
-]
-
-EXPLICIT_EXPERIENCE_PATTERN = re.compile(
-    r"(?:(?:over|more\s+than|approximately|around|nearly)\s+)?"
-    r"(?P<years>\d+(?:\.\d+)?)\s*\+?\s*"
-    r"(?:years?|yrs?)"
-    r"(?:\s+of)?(?:\s+\w+){0,6}?\s+experience",
-    re.IGNORECASE,
-)
-ALT_EXPLICIT_EXPERIENCE_PATTERN = re.compile(
-    r"(?:for\s+)?(?:more\s+than|over|around|approximately|nearly)?\s*"
-    r"(?P<years>\d{1,2}(?:\.\d+)?)\s*\+?\s*"
-    r"(?:years?|yrs?)\b",
-    re.IGNORECASE,
-)
-EXPLICIT_NOISE_WORDS = (
-    "industry",
-    "company",
-    "founded",
-    "began",
-    "since",
-    "ago",
-    "platform",
-)
+DEGREE_RANK = {
+    "ph.d.": 6,
+    "phd": 6,
+    "doctorate": 6,
+    "doctoral": 6,
+    "m.d.": 6,
+    "master": 5,
+    "m.sc.": 5,
+    "ms": 5,
+    "m.s.": 5,
+    "m.tech.": 5,
+    "mba": 5,
+    "bachelor": 4,
+    "b.sc.": 4,
+    "bs": 4,
+    "b.s.": 4,
+    "b.tech.": 4,
+    "ba": 4,
+    "b.a.": 4,
+    "associate": 3,
+    "diploma": 2,
+}
 
 MONTH_MAP = {
     "jan": 1, "january": 1,
@@ -476,22 +140,42 @@ MONTH_MAP = {
     "dec": 12, "december": 12,
 }
 
-PRESENT_WORDS = {"present", "current", "now", "today", "till", "till date"}
-
-DEGREE_KEYWORDS = {
-    "bachelor of",
-    "master of",
-    "mba",
-    "phd",
-    "doctorate",
-    "b.tech",
-    "m.tech",
-    "b.s",
-    "m.s",
-    "bs",
-    "ms",
+PRESENT_WORDS = {
+    "present",
+    "current",
+    "currently",
+    "now",
+    "today",
+    "ongoing",
+    "till",
+    "till date",
+    "till now",
+    "to date",
 }
-ENVIRONMENT_LINE_PATTERN = re.compile(r"^environment\s*:", re.IGNORECASE)
+PRESENT_TOKEN_PATTERN = r"present|current|currently|now|today|ongoing|till(?:\s+(?:date|now))?|to\s+date"
+
+URL_PATTERN = re.compile(r"https?://[^\s|,;]+", re.IGNORECASE)
+MONTH_NAME_PATTERN = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+DATE_RANGE_MONTH_PATTERN = re.compile(
+    rf"(?P<smon>{MONTH_NAME_PATTERN})\s*[,/-]?\s*(?P<syear>\d{{4}})\s*(?:-|–|—|to)\s*(?:(?P<emon>{MONTH_NAME_PATTERN})\s*[,/-]?\s*(?P<eyear>\d{{4}})|(?P<present>{PRESENT_TOKEN_PATTERN}))",
+    re.IGNORECASE,
+)
+DATE_RANGE_NUMERIC_PATTERN = re.compile(
+    rf"(?P<sm>\d{{1,2}})/(?P<sy>\d{{4}})\s*(?:-|–|—|to)\s*(?:(?P<em>\d{{1,2}})/(?P<ey>\d{{4}})|(?P<present>{PRESENT_TOKEN_PATTERN}))",
+    re.IGNORECASE,
+)
+DATE_RANGE_YEAR_PATTERN = re.compile(
+    rf"(?P<sy>\d{{4}})\s*(?:-|–|—|to)\s*(?:(?P<ey>\d{{4}})|(?P<present>{PRESENT_TOKEN_PATTERN}))",
+    re.IGNORECASE,
+)
+DATE_RANGE_MONTH_APOS_PATTERN = re.compile(
+    rf"(?P<smon>{MONTH_NAME_PATTERN})\s*[’']?\s*(?P<sy>\d{{2,4}})\s*(?:-|–|—|to)\s*(?:(?P<emon>{MONTH_NAME_PATTERN})\s*[’']?\s*(?P<ey>\d{{2,4}})|(?P<present>{PRESENT_TOKEN_PATTERN}))",
+    re.IGNORECASE,
+)
+DATE_RANGE_ISO_PATTERN = re.compile(
+    rf"(?P<siso>\d{{4}}-\d{{2}})\s*(?:-|–|—|to)\s*(?:(?P<eiso>\d{{4}}-\d{{2}})|(?P<present>{PRESENT_TOKEN_PATTERN}))",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -530,7 +214,7 @@ def _post_chat_completions(payload: dict[str, Any]) -> dict[str, Any] | None:
                 return payload_json
         except urllib.error.HTTPError as exc:
             try:
-                detail = exc.read().decode("utf-8", errors="ignore")[:1000]
+                detail = exc.read().decode("utf-8", errors="ignore")[:2000]
             except Exception:
                 detail = str(exc)
             logger.error("[LLM_PARSE] OpenAI HTTPError attempt=%s: %s", attempt, detail)
@@ -549,46 +233,23 @@ def _post_chat_completions(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def parse_resume_with_llm(text: str) -> dict[str, Any] | None:
-    work_excerpt = _extract_work_excerpt(text)
-    python_entries = extract_experience_entries_from_blocks(work_excerpt)
-    claimed_years = _extract_explicit_experience_years(text)
+def parse_resume_with_ft_v2(text: str) -> dict[str, Any] | None:
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    normalized_text = normalize_resume_text(text)
 
     system_prompt = (
-        f"{ATS_RESUME_SCHEMA_DESCRIPTION}\n\n"
-        "--------------------------------\n\n"
+        f"{ATS_RESUME_SCHEMA_DESCRIPTION_V2}\n\n"
         "OUTPUT SCHEMA\n\n"
-        f"{ATS_RESUME_OUTPUT_SCHEMA}\n\n"
-        "Before returning JSON, internally verify that:\n"
-        "- current_last_job matches the most recent role\n"
-        "- education dates are not counted as work experience\n"
-        "- experience_years_final is supported by either explicit claim or work history dates\n"
+        f"{ATS_RESUME_OUTPUT_SCHEMA_V2}"
     )
-
-    header_excerpt = _extract_header_excerpt(text, max_lines=35)
-    user_prompt = (
-        "JOB LOCATION: null\n\n"
-        f"Resume Header Excerpt (contact/details):\n{header_excerpt[:3000]}\n\n"
-        f"Full Resume Text:\n{text[:24000]}\n\n"
-        f"Work Experience Section:\n{work_excerpt[:12000]}\n\n"
-        f"Python detected experience entries:\n"
-        f"{json.dumps(python_entries[:100], ensure_ascii=False)}\n\n"
-        f"Explicit claimed years detected by regex: {claimed_years}\n"
-    )
-    # Legacy prompt path kept for quick fallback:
-    # user_prompt = (
-    #     f"Resume Header Excerpt (contact/details):\n{header_excerpt[:3000]}\n\n"
-    #     f"Work Experience Section:\n{work_excerpt[:20000]}\n\n"
-    #     f"Python detected experience entries:\n"
-    #     f"{json.dumps(python_entries[:100], ensure_ascii=False)}\n\n"
-    #     f"Full Resume (truncated):\n{text[:12000]}"
-    # )
 
     payload = {
         "model": LLM_PARSE_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": f"Resume text:\n\n{normalized_text[:24000]}"},
         ],
         "response_format": {"type": "json_object"},
     }
@@ -602,158 +263,7 @@ def parse_resume_with_llm(text: str) -> dict[str, Any] | None:
     if not parsed:
         return None
 
-    parsed = _normalize_llm_parse_output(parsed, text)
-
-    llm_entries = parsed.get("experience_entries", [])
-    if not llm_entries and python_entries:
-        parsed["experience_entries"] = python_entries
-
-    parsed["experience_years_claimed"] = claimed_years
-    parsed["experience_years_calculated"] = _calculate_experience_years_from_entries(parsed["experience_entries"])
-
-    if parsed["experience_years_calculated"] is None:
-        parsed["experience_years_calculated"] = _calculate_experience_years_from_raw_text(work_excerpt)
-
-    final_years, source = _pick_final_experience_years(
-        claimed=parsed.get("experience_years_claimed"),
-        calculated=parsed.get("experience_years_calculated"),
-    )
-
-    parsed["experience_calculation"] = _build_experience_calculation(parsed["experience_entries"])
-    parsed["experience_years_final"] = final_years
-    parsed["experience_years"] = final_years
-    parsed["experience_source"] = source
-    return parsed
-
-
-def normalize_resume_fields_with_llm(text: str, preliminary: dict[str, Any]) -> dict[str, Any] | None:
-    work_excerpt = _extract_work_excerpt(text)
-    python_entries = extract_experience_entries_from_blocks(work_excerpt)
-    claimed_years = _extract_explicit_experience_years(text)
-    header_excerpt = _extract_header_excerpt(text, max_lines=35)
-
-    system_prompt = (
-        "You normalize resume extraction output.\n"
-        "Return ONLY valid JSON. No markdown.\n\n"
-        "Return EXACTLY these keys:\n"
-        "email, phone, skills, highest_degree, sponsorship_required, "
-        "candidate_location, current_last_job, experience_years_claimed, experience_entries.\n\n"
-        "Rules:\n"
-        "1) skills must be unique canonical strings.\n"
-        "2) current_last_job must be title only.\n"
-        "3) sponsorship_required must be true, false, or null.\n"
-        "4) Do NOT calculate total experience from dates.\n"
-        "5) Preserve only real professional work history in experience_entries.\n"
-        "6) Normalize dates strictly as 'YYYY-MM', 'YYYY', or null.\n"
-        "7) candidate_location must be US-only in format 'City, ST'; if uncertain or non-US, return null."
-    )
-
-    user_prompt = (
-        f"Resume Header Excerpt:\n{header_excerpt[:3000]}\n\n"
-        f"Work Experience Excerpt:\n{work_excerpt[:40000]}\n\n"
-        f"Python-detected experience entries from job blocks:\n"
-        f"{json.dumps(python_entries[:100], ensure_ascii=False)}\n\n"
-        f"Explicit claimed years detected by regex: {claimed_years}\n\n"
-        f"Preliminary Parsed JSON:\n{json.dumps(preliminary, ensure_ascii=False)}"
-    )
-
-    payload = {
-        "model": LLM_PARSE_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "response_format": {"type": "json_object"},
-    }
-
-    response = _post_chat_completions(payload)
-    if not response:
-        logger.warning("[LLM_PARSE] No usable normalization response from OpenAI")
-        return None
-
-    parsed = _extract_json_from_openai_response(response)
-    if not parsed:
-        return None
-
-    parsed = _normalize_llm_parse_output(parsed, text)
-    parsed["experience_years_calculated"] = _calculate_experience_years_from_entries(parsed["experience_entries"])
-
-    if parsed["experience_years_calculated"] is None:
-        parsed["experience_years_calculated"] = _calculate_experience_years_from_raw_text(work_excerpt)
-
-    final_years, source = _pick_final_experience_years(
-        claimed=parsed.get("experience_years_claimed"),
-        calculated=parsed.get("experience_years_calculated"),
-    )
-
-    parsed["experience_calculation"] = _build_experience_calculation(parsed["experience_entries"])
-    parsed["experience_years_final"] = final_years
-    parsed["experience_years"] = final_years
-    parsed["experience_source"] = source
-    return parsed
-
-
-def reconcile_resume_parse_with_llm(
-    text: str,
-    *,
-    llm_parsed: dict[str, Any],
-    python_parsed: dict[str, Any],
-) -> dict[str, Any] | None:
-    discrepancies = _summarize_parse_discrepancies(llm_parsed=llm_parsed, python_parsed=python_parsed)
-    if not discrepancies:
-        return None
-
-    system_prompt = (
-        f"{ATS_RESUME_SCHEMA_DESCRIPTION}\n\n"
-        "You are given two candidate parses: one from an LLM and one from Python validation heuristics.\n"
-        "Use the full raw resume text as the source of truth.\n"
-        "Resolve the disparities and return one corrected final JSON object.\n\n"
-        "OUTPUT SCHEMA\n\n"
-        f"{ATS_RESUME_OUTPUT_SCHEMA}\n\n"
-        "Additional reconciliation rules:\n"
-        "1) Prefer explicit summary years only when they clearly refer to total work experience.\n"
-        "2) current_last_job must be title only.\n"
-        "3) Exclude education/project-only entries from experience_entries.\n"
-        "4) If one parser is clearly wrong and the raw text is clear, fix it.\n"
-        "5) Do not carry forward incorrect values just because they appear in one candidate parse."
-    )
-    user_prompt = (
-        f"Full Resume Text:\n{text[:26000]}\n\n"
-        f"LLM Parse:\n{json.dumps(llm_parsed, ensure_ascii=False)}\n\n"
-        f"Python Validation Parse:\n{json.dumps(python_parsed, ensure_ascii=False)}\n\n"
-        f"Detected Discrepancies:\n{json.dumps(discrepancies, ensure_ascii=False)}"
-    )
-    payload = {
-        "model": LLM_PARSE_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "response_format": {"type": "json_object"},
-    }
-
-    response = _post_chat_completions(payload)
-    if not response:
-        logger.warning("[LLM_PARSE] No usable reconciliation response from OpenAI")
-        return None
-
-    parsed = _extract_json_from_openai_response(response)
-    if not parsed:
-        return None
-
-    parsed = _normalize_llm_parse_output(parsed, text)
-    parsed["experience_years_calculated"] = _calculate_experience_years_from_entries(parsed["experience_entries"])
-    if parsed["experience_years_calculated"] is None:
-        parsed["experience_years_calculated"] = _calculate_experience_years_from_raw_text(_extract_work_excerpt(text))
-    final_years, source = _pick_final_experience_years(
-        claimed=parsed.get("experience_years_claimed"),
-        calculated=parsed.get("experience_years_calculated"),
-    )
-    parsed["experience_calculation"] = _build_experience_calculation(parsed["experience_entries"])
-    parsed["experience_years_final"] = final_years
-    parsed["experience_years"] = final_years
-    parsed["experience_source"] = source
-    return parsed
+    return _normalize_llm_parse_output_v2(parsed, normalized_text)
 
 
 def _extract_json_from_openai_response(response: dict[str, Any]) -> dict[str, Any] | None:
@@ -777,781 +287,716 @@ def _extract_json_from_openai_response(response: dict[str, Any]) -> dict[str, An
     return parsed if isinstance(parsed, dict) else None
 
 
-def _summarize_parse_discrepancies(
-    *,
-    llm_parsed: dict[str, Any],
-    python_parsed: dict[str, Any],
-) -> dict[str, Any]:
-    discrepancies: dict[str, Any] = {}
-    for key in ("email", "phone", "highest_degree", "candidate_location", "current_last_job"):
-        llm_value = llm_parsed.get(key)
-        python_value = python_parsed.get(key)
-        if llm_value != python_value:
-            discrepancies[key] = {"llm": llm_value, "python": python_value}
+def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dict[str, Any]:
+    def clean(value: Any) -> str | None:
+        return _clean_string(value)
 
-    llm_claimed = llm_parsed.get("experience_years_claimed")
-    py_claimed = python_parsed.get("experience_years_claimed")
-    if llm_claimed != py_claimed:
-        discrepancies["experience_years_claimed"] = {"llm": llm_claimed, "python": py_claimed}
+    parsed = parsed if isinstance(parsed, dict) else {}
 
-    llm_calc = llm_parsed.get("experience_years_calculated")
-    py_calc = python_parsed.get("experience_years_calculated")
-    if llm_calc != py_calc:
-        discrepancies["experience_years_calculated"] = {"llm": llm_calc, "python": py_calc}
-
-    llm_entries = llm_parsed.get("experience_entries", [])
-    python_entries = python_parsed.get("experience_entries", [])
-    if isinstance(llm_entries, list) and isinstance(python_entries, list):
-        if len(llm_entries) != len(python_entries):
-            discrepancies["experience_entry_count"] = {"llm": len(llm_entries), "python": len(python_entries)}
-        elif llm_entries != python_entries:
-            discrepancies["experience_entries"] = {"llm": llm_entries[:5], "python": python_entries[:5]}
-
-    return discrepancies
-
-
-def _normalize_llm_parse_output(parsed: dict[str, Any], resume_text: str) -> dict[str, Any]:
-    parsed["full_name"] = parsed.get("full_name") if isinstance(parsed.get("full_name"), str) else None
-    parsed["email"] = parsed.get("email") if isinstance(parsed.get("email"), str) else None
-    parsed["phone"] = parsed.get("phone") if isinstance(parsed.get("phone"), str) else None
-    parsed["highest_degree"] = parsed.get("highest_degree") if isinstance(parsed.get("highest_degree"), str) else None
-    parsed["candidate_location"] = parsed.get("candidate_location") if isinstance(parsed.get("candidate_location"), str) else None
-    parsed["current_last_job"] = parsed.get("current_last_job") if isinstance(parsed.get("current_last_job"), str) else None
-    parsed["linkedin_url"] = parsed.get("linkedin_url") if isinstance(parsed.get("linkedin_url"), str) else None
-    parsed["github_url"] = parsed.get("github_url") if isinstance(parsed.get("github_url"), str) else None
-    parsed["portfolio_url"] = parsed.get("portfolio_url") if isinstance(parsed.get("portfolio_url"), str) else None
-    parsed["professional_summary"] = (
-        parsed.get("professional_summary")
-        if isinstance(parsed.get("professional_summary"), str)
-        else None
-    )
-    parsed["raw_text_quality"] = (
-        parsed.get("raw_text_quality")
-        if parsed.get("raw_text_quality") in {"high", "medium", "low"}
-        else None
-    )
-
-    skills = parsed.get("skills", [])
-    if not isinstance(skills, list):
-        skills = []
-    parsed["skills"] = _unique_clean_strings(skills)
-
-    languages = parsed.get("languages", [])
-    if not isinstance(languages, list):
-        languages = []
-    parsed["languages"] = _unique_clean_strings(languages)
-
-    parser_notes = parsed.get("parser_notes", [])
-    if not isinstance(parser_notes, list):
-        parser_notes = []
-    parsed["parser_notes"] = _unique_clean_strings(parser_notes)
+    result: dict[str, Any] = {
+        "full_name": clean(parsed.get("full_name")),
+        "email": clean(parsed.get("email")),
+        "phone": clean(parsed.get("phone")),
+        "candidate_location": clean(parsed.get("candidate_location")),
+        "linkedin_url": clean(parsed.get("linkedin_url")),
+        "github_url": clean(parsed.get("github_url")),
+        "portfolio_url": clean(parsed.get("portfolio_url")),
+        "professional_summary": clean(parsed.get("professional_summary")),
+        "skills": _unique_clean_strings(parsed.get("skills", [])) if isinstance(parsed.get("skills"), list) else [],
+        "languages": _unique_clean_strings(parsed.get("languages", [])) if isinstance(parsed.get("languages"), list) else [],
+        "highest_degree": clean(parsed.get("highest_degree")),
+        "education": [],
+        "current_last_job": clean(parsed.get("current_last_job")),
+        "experience_entries": [],
+        "projects": [],
+        "certifications": [],
+        "awards": _unique_clean_strings(parsed.get("awards", [])) if isinstance(parsed.get("awards"), list) else [],
+        "volunteering": _unique_clean_strings(parsed.get("volunteering", [])) if isinstance(parsed.get("volunteering"), list) else [],
+        "publications": _unique_clean_strings(parsed.get("publications", [])) if isinstance(parsed.get("publications"), list) else [],
+    }
 
     education = parsed.get("education", [])
-    if not isinstance(education, list):
-        education = []
-    parsed["education"] = [
-        _normalize_education_entry(entry)
-        for entry in education
-        if isinstance(entry, dict)
-    ]
+    if isinstance(education, list):
+        result["education"] = [
+            _normalize_education_entry_v2(entry)
+            for entry in education
+            if isinstance(entry, dict)
+        ]
 
     experience_entries = parsed.get("experience_entries", [])
-    if not isinstance(experience_entries, list):
-        experience_entries = []
-    parsed["experience_entries"] = [
-        _normalize_experience_entry(e)
-        for e in experience_entries
-        if isinstance(e, dict)
-    ]
+    if isinstance(experience_entries, list):
+        result["experience_entries"] = [
+            _normalize_experience_entry_v2(entry)
+            for entry in experience_entries
+            if isinstance(entry, dict)
+        ]
 
-    claimed = parsed.get("experience_years_claimed")
-    if isinstance(claimed, (int, float)):
-        parsed["experience_years_claimed"] = round(float(claimed), 1)
-    else:
-        parsed["experience_years_claimed"] = _extract_explicit_experience_years(resume_text)
+    projects = parsed.get("projects", [])
+    if isinstance(projects, list):
+        normalized_projects: list[dict[str, Any]] = []
+        for project in projects:
+            if isinstance(project, str):
+                normalized_projects.append(
+                    {
+                        "name": clean(project),
+                        "description": None,
+                        "technologies": [],
+                        "url": None,
+                    }
+                )
+            elif isinstance(project, dict):
+                normalized_projects.append(
+                    {
+                        "name": clean(project.get("name")),
+                        "description": clean(project.get("description")),
+                        "technologies": _unique_clean_strings(project.get("technologies", []))
+                        if isinstance(project.get("technologies"), list) else [],
+                        "url": clean(project.get("url")),
+                    }
+                )
+        result["projects"] = normalized_projects
 
-    for field in ("experience_years_calculated", "experience_years_final", "distance_miles"):
-        value = parsed.get(field)
-        if isinstance(value, (int, float)):
-            parsed[field] = round(float(value), 1)
-        else:
-            parsed[field] = None
+    certifications = parsed.get("certifications", [])
+    if isinstance(certifications, list):
+        result["certifications"] = [
+            _normalize_certification_entry_v2(entry)
+            for entry in certifications
+            if isinstance(entry, dict)
+        ]
 
-    field_confidence = parsed.get("field_confidence", {})
-    if not isinstance(field_confidence, dict):
-        field_confidence = {}
-    parsed["field_confidence"] = {
-        key: _normalize_confidence(field_confidence.get(key))
-        for key in (
-            "full_name",
-            "email",
-            "phone",
-            "candidate_location",
-            "current_last_job",
-            "highest_degree",
-            "skills",
-            "experience_entries",
-            "experience_years_final",
-        )
-    }
+    result["experience_entries"] = sort_experience_entries(result["experience_entries"])
 
-    sponsorship_required = parsed.get("sponsorship_required")
-    if isinstance(sponsorship_required, bool) or sponsorship_required is None:
-        parsed["sponsorship_required"] = sponsorship_required
-    else:
-        parsed["sponsorship_required"] = None
+    if len(result["experience_entries"]) <= 1 and _count_date_ranges(raw_text) >= 3:
+        fallback_entries = _extract_experience_entries_from_text(raw_text)
+        if len(fallback_entries) > len(result["experience_entries"]):
+            result["experience_entries"] = sort_experience_entries(fallback_entries)
 
-    return parsed
+    result["projects"] = [item for item in result["projects"] if not _is_empty_project(item)]
+    result["education"] = [item for item in result["education"] if not _is_empty_education(item)]
 
+    environment_skills = _extract_environment_skills_from_text(raw_text)
+    if not result["skills"] and _has_skills_section(raw_text):
+        result["skills"] = _extract_skills_from_text(raw_text, result["experience_entries"])
+    if environment_skills:
+        result["skills"] = _unique_clean_strings([*result["skills"], *environment_skills])
 
-def _normalize_experience_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "title": _clean_string(entry.get("title")),
-        "company": _clean_string(entry.get("company")),
-        "start_date": _clean_date_string(entry.get("start_date")),
-        "end_date": _clean_date_string(entry.get("end_date")),
-        "is_current": bool(entry.get("is_current")) if entry.get("is_current") is not None else False,
-        "section": _clean_string(entry.get("section")),
-        "employment_type": _clean_string(entry.get("employment_type")),
-        "location": _clean_string(entry.get("location") or entry.get("candidate_location_from_role")),
-        "responsibilities": _unique_clean_strings(entry.get("responsibilities", [])) if isinstance(entry.get("responsibilities"), list) else [],
-        "related_skills": _unique_clean_strings(entry.get("related_skills", [])) if isinstance(entry.get("related_skills"), list) else [],
-    }
+    if not result["certifications"] and _has_certification_section(raw_text):
+        result["certifications"] = _extract_certifications_from_text(raw_text)
+
+    if result["professional_summary"] is None:
+        result["professional_summary"] = _extract_professional_summary_from_text(raw_text)
+
+    if result["candidate_location"] is None:
+        for entry in result["experience_entries"]:
+            location = entry.get("location")
+            if isinstance(location, str) and location.strip():
+                result["candidate_location"] = location.strip()
+                break
+
+    if result["highest_degree"] is None:
+        result["highest_degree"] = derive_highest_degree(result["education"])
+
+    if result["current_last_job"] is None:
+        result["current_last_job"] = derive_current_last_job(result["experience_entries"])
+
+    return result
 
 
-def _normalize_education_entry(entry: dict[str, Any]) -> dict[str, Any]:
+def _normalize_education_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "institution": _clean_string(entry.get("institution")),
         "degree": _clean_string(entry.get("degree")),
         "field_of_study": _clean_string(entry.get("field_of_study")),
-        "start_date": _clean_date_string(entry.get("start_date")),
-        "end_date": _clean_date_string(entry.get("end_date")),
+        "start_date": _clean_education_date_string(entry.get("start_date")),
+        "end_date": _clean_education_date_string(entry.get("end_date")),
         "gpa": _clean_string(entry.get("gpa")),
         "location": _clean_string(entry.get("location")),
     }
 
 
-def _normalize_confidence(value: Any) -> float | None:
-    if not isinstance(value, (int, float)):
-        return None
-    numeric = float(value)
-    if numeric < 0:
-        return 0.0
-    if numeric > 1:
-        return 1.0
-    return round(numeric, 2)
+def _normalize_experience_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
+    is_current = entry.get("is_current")
+    raw_start = entry.get("start_date")
+    raw_end = entry.get("end_date")
+    start_date = _clean_date_string(raw_start)
+    end_date = _clean_date_string(raw_end)
+    inferred_is_current = is_current if isinstance(is_current, bool) else None
 
-
-def _pick_final_experience_years(claimed: float | None, calculated: float | None) -> tuple[float | None, str]:
-    if claimed is not None:
-        return round(claimed, 1), "explicit_claim_from_summary"
-
-    if calculated is not None:
-        return round(calculated, 1), "python_from_experience_entries"
-
-    return None, "unavailable"
-
-
-def extract_experience_entries_from_blocks(text: str) -> list[dict[str, Any]]:
-    blocks = extract_job_blocks(text)
-    entries: list[dict[str, Any]] = []
-
-    for block in blocks:
-        entry = _parse_single_job_block(block)
-        if entry:
-            entries.append(entry)
-
-    return entries
-
-
-def _parse_single_job_block(block: str) -> dict[str, Any] | None:
-    lines = [line.strip() for line in block.splitlines() if line.strip()]
-    if not lines:
-        return None
-
-    if ENVIRONMENT_LINE_PATTERN.match(lines[0]):
-        return None
-
-    company = None
-    title = None
-    location = None
-    start_date = None
-    end_date = None
-    is_current = False
-
-    first_line = lines[0]
-
-    client_match = CLIENT_LINE_PATTERN.match(first_line)
-    if client_match:
-        company = client_match.group("company").strip()
-        interval_info = _extract_normalized_dates_from_text(client_match.group("dates"))
-        if interval_info:
-            start_date, end_date, is_current = interval_info
-
-        for line in lines[1:8]:
-            location_match = LOCATION_LABEL_PATTERN.match(line)
-            if location_match and location is None:
-                location = location_match.group("location").strip()
-            role_match = ROLE_LINE_PATTERN.match(line)
-            if role_match:
-                title = role_match.group("title").strip()
-
-    company_location_date_match = COMPANY_LOCATION_DATE_LINE_PATTERN.match(first_line)
-    if company_location_date_match:
-        company = company_location_date_match.group("company").strip()
-        location = company_location_date_match.group("location").strip()
-        interval_info = _extract_normalized_dates_from_text(company_location_date_match.group("dates"))
-        if interval_info:
-            start_date, end_date, is_current = interval_info
-
-        for line in lines[1:5]:
-            role_match = ROLE_LINE_PATTERN.match(line)
-            if role_match:
-                title = role_match.group("title").strip()
-                break
-            if title is None and not _line_contains_date_range(line) and ":" not in line and len(line.split()) <= 8:
-                title = line.strip()
-                break
-
-    # Split only on pipe first
-    pipe_parts = [p.strip() for p in first_line.split("|") if p.strip()]
-
-    if not company and len(pipe_parts) >= 3:
-        company = pipe_parts[0]
-
-        # middle part may contain title + location mixed together
-        middle = pipe_parts[1]
-        dates_part = pipe_parts[2]
-
-        interval_info = _extract_normalized_dates_from_text(dates_part)
-        if interval_info:
-            start_date, end_date, is_current = interval_info
-
-        # Try to split title/location heuristically
-        location_match = re.search(r"([A-Za-z .]+,\s*[A-Z]{2}|[A-Za-z .]+,\s*[A-Za-z]+)$", middle)
-        if location_match:
-            location = location_match.group(1).strip()
-            title = middle[:location_match.start()].strip()
-        else:
-            title = middle.strip()
-
-    elif not company and len(pipe_parts) == 2:
-        company = pipe_parts[0]
-        title = pipe_parts[1]
-
-        # Check next lines for date/location
-        for line in lines[1:3]:
-            interval_info = _extract_normalized_dates_from_text(line)
-            if interval_info and start_date is None:
-                start_date, end_date, is_current = interval_info
-
-            if "|" in line:
-                subparts = [p.strip() for p in line.split("|") if p.strip()]
-                for part in subparts:
-                    if _extract_normalized_dates_from_text(part):
-                        continue
-                    if "," in part:
-                        location = part
-                        break
-
-    if (not company and not title) and len(lines) >= 2:
-        # Fallback for multiline layouts:
-        # Title
-        # Company
-        # Location | Dates  OR  Dates
-        first = lines[0]
-        second = lines[1]
-        candidate_date_line = None
-        candidate_location = None
-
-        for line in lines[1:4]:
-            if _extract_normalized_dates_from_text(line):
-                candidate_date_line = line
-                break
-
-        if candidate_date_line:
-            company = second
-            title = first
-            if "|" in candidate_date_line:
-                subparts = [p.strip() for p in candidate_date_line.split("|") if p.strip()]
-                for part in subparts:
-                    interval_info = _extract_normalized_dates_from_text(part)
-                    if interval_info and start_date is None:
-                        start_date, end_date, is_current = interval_info
-                        continue
-                    if "," in part and candidate_location is None:
-                        candidate_location = part
-            else:
-                interval_info = _extract_normalized_dates_from_text(candidate_date_line)
-                if interval_info:
-                    start_date, end_date, is_current = interval_info
-
-            location = candidate_location
-
-    if not company and not title:
-        return None
+    if (start_date is None or end_date is None) and (
+        isinstance(raw_start, str) or isinstance(raw_end, str)
+    ):
+        range_source = f"{raw_start or ''} {raw_end or ''}".strip()
+        inferred_start, inferred_end, inferred_current = _extract_date_range_from_text(range_source)
+        if start_date is None:
+            start_date = inferred_start
+        if end_date is None:
+            end_date = inferred_end
+        if inferred_is_current is None and inferred_current:
+            inferred_is_current = True
 
     return {
-        "title": _clean_string(title),
-        "company": _clean_string(company),
+        "company": _clean_string(entry.get("company")),
+        "title": _clean_string(entry.get("title")),
+        "location": _clean_string(entry.get("location")),
         "start_date": start_date,
         "end_date": end_date,
-        "is_current": is_current,
-        "section": "Experience",
-        "employment_type": None,
-        "candidate_location_from_role": _clean_string(location),
+        "is_current": inferred_is_current,
+        "employment_type": _clean_string(entry.get("employment_type")),
+        "description": _trim_experience_description(entry.get("description")),
+        "skills_used": _unique_clean_strings(entry.get("skills_used", []))
+        if isinstance(entry.get("skills_used"), list) else [],
+        "achievements": _unique_clean_strings(entry.get("achievements", []))
+        if isinstance(entry.get("achievements"), list) else [],
     }
 
-def extract_job_blocks(text: str) -> list[str]:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    blocks: list[str] = []
-    i = 0
 
-    while i < len(lines):
-        line = lines[i]
+def _normalize_certification_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": _clean_string(entry.get("name")),
+        "issuer": _clean_string(entry.get("issuer")),
+        "date": _clean_date_string(entry.get("date")),
+        "credential_id": _clean_string(entry.get("credential_id")),
+    }
 
-        if SECTION_EXCLUDE_HEADERS.match(line):
+
+def _is_empty_project(project: dict[str, Any]) -> bool:
+    return (
+        not project.get("name")
+        and not project.get("description")
+        and not project.get("url")
+        and not project.get("technologies")
+    )
+
+
+def _is_empty_education(education: dict[str, Any]) -> bool:
+    return (
+        not education.get("institution")
+        and not education.get("degree")
+        and not education.get("field_of_study")
+        and not education.get("start_date")
+        and not education.get("end_date")
+        and not education.get("gpa")
+        and not education.get("location")
+    )
+
+
+def _has_skills_section(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?im)^\s*(technical\s+skill(?:-set|s)?|skills?|toolkit|expertise)\s*:?\s*$",
+            text,
+        )
+    )
+
+
+def _has_certification_section(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?im)\b(certifications?|education\s*/\s*certi\w*\s*/\s*training)\b",
+            text,
+        )
+    )
+
+
+def _extract_section_block(text: str, header_pattern: str, max_lines: int = 60) -> list[str]:
+    lines = [line.strip() for line in text.splitlines()]
+    in_section = False
+    collected: list[str] = []
+
+    for line in lines:
+        if not in_section and re.search(header_pattern, line, re.IGNORECASE):
+            in_section = True
+            continue
+
+        if not in_section:
+            continue
+
+        if re.fullmatch(r"[A-Z][A-Z /\-&]{3,}:?", line) and collected:
+            break
+        if re.fullmatch(r"[A-Za-z][A-Za-z /\-&]{3,}:", line) and collected:
             break
 
-        if ENVIRONMENT_LINE_PATTERN.match(line):
-            i += 1
-            continue
+        if line:
+            collected.append(line)
+            if len(collected) >= max_lines:
+                break
 
-        if CLIENT_LINE_PATTERN.match(line):
-            block_lines = [line]
-            j = i + 1
-            while j < len(lines):
-                candidate = lines[j]
-
-                if SECTION_EXCLUDE_HEADERS.match(candidate):
-                    break
-
-                if j > i and CLIENT_LINE_PATTERN.match(candidate):
-                    break
-
-                block_lines.append(candidate)
-                j += 1
-
-            blocks.append("\n".join(block_lines))
-            i = j
-            continue
-
-        if COMPANY_LOCATION_DATE_LINE_PATTERN.match(line):
-            block_lines = [line]
-            j = i + 1
-            while j < len(lines):
-                candidate = lines[j]
-
-                if SECTION_EXCLUDE_HEADERS.match(candidate):
-                    break
-
-                if j > i and (CLIENT_LINE_PATTERN.match(candidate) or COMPANY_LOCATION_DATE_LINE_PATTERN.match(candidate)):
-                    break
-
-                block_lines.append(candidate)
-                j += 1
-
-            blocks.append("\n".join(block_lines))
-            i = j
-            continue
-
-        # Try inline single-line role first
-        if _looks_like_role_line(line) and _find_date_line_nearby(lines, i) is not None:
-            block_lines = [line]
-            date_idx = _find_date_line_nearby(lines, i)
-
-            # Add the date line if it is not the same line
-            if date_idx is not None and date_idx != i:
-                block_lines.append(lines[date_idx])
-
-            j = max(i, (date_idx or i)) + 1
-
-            while j < len(lines):
-                candidate = lines[j]
-
-                if SECTION_EXCLUDE_HEADERS.match(candidate):
-                    break
-
-                if _looks_like_new_job_start_relaxed(lines, j):
-                    break
-
-                block_lines.append(candidate)
-                j += 1
-
-            blocks.append("\n".join(block_lines))
-            i = j
-            continue
-
-        # Fallback multiline role layout:
-        # Title
-        # Company
-        # Location | Dates or Dates
-        if _looks_like_multiline_job_start(lines, i):
-            block_lines = [lines[i], lines[i + 1]]
-            j = i + 2
-            while j < len(lines):
-                candidate = lines[j]
-
-                if SECTION_EXCLUDE_HEADERS.match(candidate):
-                    break
-
-                if j > i + 2 and (_looks_like_new_job_start_relaxed(lines, j) or _looks_like_multiline_job_start(lines, j)):
-                    break
-
-                block_lines.append(candidate)
-                j += 1
-
-            blocks.append("\n".join(block_lines))
-            i = j
-            continue
-
-        i += 1
-
-    return blocks
+    return collected
 
 
-def _looks_like_role_line(line: str) -> bool:
-    # More tolerant than strict regex
-    if "|" not in line:
-        return False
+def _extract_skills_from_text(text: str, entries: list[dict[str, Any]]) -> list[str]:
+    skill_candidates: list[str] = []
 
-    parts = [p.strip() for p in line.split("|") if p.strip()]
-    if len(parts) < 2:
-        return False
-
-    # Usually company | title
-    return True
-
-
-def _find_date_line_nearby(lines: list[str], idx: int) -> int | None:
-    # Search current line and next 2 lines for a date range
-    for j in range(idx, min(idx + 3, len(lines))):
-        if _line_contains_date_range(lines[j]):
-            return j
-    return None
-
-
-def _looks_like_new_job_start_relaxed(lines: list[str], idx: int) -> bool:
-    line = lines[idx]
-
-    if SECTION_EXCLUDE_HEADERS.match(line):
-        return True
-
-    if _looks_like_role_line(line):
-        nearby_date_idx = _find_date_line_nearby(lines, idx)
-        if nearby_date_idx is not None:
-            return True
-
-    if CLIENT_LINE_PATTERN.match(line):
-        return True
-
-    if COMPANY_LOCATION_DATE_LINE_PATTERN.match(line):
-        return True
-
-    if _looks_like_multiline_job_start(lines, idx):
-        return True
-
-    return False
-
-
-def _looks_like_multiline_job_start(lines: list[str], idx: int) -> bool:
-    if idx + 2 >= len(lines):
-        return False
-
-    first = lines[idx].strip()
-    second = lines[idx + 1].strip()
-    third = lines[idx + 2].strip()
-
-    if SECTION_EXCLUDE_HEADERS.match(first) or SECTION_EXCLUDE_HEADERS.match(second):
-        return False
-    if "|" in first:
-        return False
-    if len(first.split()) > 8 or len(second.split()) > 10:
-        return False
-    if not _line_contains_date_range(third):
-        return False
-    return True
-
-def _looks_like_role_line(line: str) -> bool:
-    # More tolerant than strict regex
-    if "|" not in line:
-        return False
-
-    parts = [p.strip() for p in line.split("|") if p.strip()]
-    if len(parts) < 2:
-        return False
-
-    # Usually company | title
-    return True
-
-
-def _find_date_line_nearby(lines: list[str], idx: int) -> int | None:
-    # Search current line and next 2 lines for a date range
-    for j in range(idx, min(idx + 3, len(lines))):
-        if _line_contains_date_range(lines[j]):
-            return j
-    return None
-
-
-def _looks_like_new_job_start_relaxed(lines: list[str], idx: int) -> bool:
-    line = lines[idx]
-
-    if SECTION_EXCLUDE_HEADERS.match(line):
-        return True
-
-    if _looks_like_role_line(line):
-        nearby_date_idx = _find_date_line_nearby(lines, idx)
-        if nearby_date_idx is not None:
-            return True
-
-    return False
-
-def _looks_like_new_job_start(lines: list[str], idx: int) -> bool:
-    line = lines[idx]
-
-    if INLINE_JOB_PATTERN.match(line):
-        return True
-
-    if JOB_HEADER_PATTERN.match(line) and idx + 1 < len(lines):
-        next_line = lines[idx + 1]
-        m = DATE_LOCATION_LINE_PATTERN.match(next_line)
-        if m and _line_contains_date_range(m.group("dates")):
-            return True
-
-    return False
-
-
-def _extract_normalized_dates_from_text(text: str) -> tuple[str | None, str | None, bool] | None:
-    text = text.strip()
-
-    for pattern in DATE_RANGE_PATTERNS:
-        match = pattern.search(text)
-        if not match:
-            continue
-
-        gd = match.groupdict()
-
-        if gd.get("smon") and gd.get("syr2"):
-            s_month = MONTH_MAP.get(gd["smon"].lower())
-            if not s_month:
+    block = _extract_section_block(
+        text,
+        r"^\s*(technical\s+skill(?:-set|s)?|skills?|toolkit|expertise)\s*:?\s*$",
+        max_lines=80,
+    )
+    for line in block:
+        parts = re.split(r"[:|,;/]", line)
+        for part in parts:
+            cleaned = _clean_string(part)
+            if not cleaned:
                 continue
-            s_year = _normalize_two_or_four_digit_year(gd["syr2"])
-            if s_year is None:
+            if len(cleaned) < 2:
                 continue
-            start = f"{s_year:04d}-{s_month:02d}"
-
-            e_raw = (gd.get("ep") or "").lower()
-            if e_raw in PRESENT_WORDS:
-                return start, None, True
-
-            end_month_name = gd.get("emon")
-            end_year_raw = gd.get("eyr2")
-            if end_month_name and end_year_raw:
-                e_month = MONTH_MAP.get(end_month_name.lower())
-                e_year = _normalize_two_or_four_digit_year(end_year_raw)
-                if e_month and e_year:
-                    end = f"{e_year:04d}-{e_month:02d}"
-                    return start, end, False
-
-        if gd.get("smon_ns") and gd.get("syr_ns"):
-            s_month = MONTH_MAP.get(gd["smon_ns"].lower())
-            if not s_month:
+            if cleaned.lower() in {"tools", "methodologies", "database", "other tools", "operating system"}:
                 continue
-            s_year = int(gd["syr_ns"])
-            start = f"{s_year:04d}-{s_month:02d}"
-
-            e_raw = (gd.get("ep_ns") or "").lower()
-            if e_raw in PRESENT_WORDS:
-                return start, None, True
-
-            end_month_name = gd.get("emon_ns")
-            end_year_raw = gd.get("eyr_ns")
-            if end_month_name and end_year_raw:
-                e_month = MONTH_MAP.get(end_month_name.lower())
-                if e_month:
-                    end = f"{int(end_year_raw):04d}-{e_month:02d}"
-                    return start, end, False
-
-        if gd.get("sy") and gd.get("sm"):
-            s_year = int(gd["sy"])
-            s_month = int(gd["sm"])
-            if not (1 <= s_month <= 12):
-                continue
-            start = f"{s_year:04d}-{s_month:02d}"
-
-            if (gd.get("ep") or "").lower() in PRESENT_WORDS:
-                return start, None, True
-
-            if gd.get("ey") and gd.get("em"):
-                e_year = int(gd["ey"])
-                e_month = int(gd["em"])
-                if not (1 <= e_month <= 12):
-                    continue
-                end = f"{e_year:04d}-{e_month:02d}"
-                return start, end, False
-
-        if gd.get("smon") and gd.get("syr"):
-            s_month = MONTH_MAP.get(gd["smon"].lower())
-            s_year = int(gd["syr"])
-            if not s_month:
-                continue
-
-            start = f"{s_year:04d}-{s_month:02d}"
-            e_raw = (gd.get("emon") or "").lower()
-
-            if e_raw in PRESENT_WORDS:
-                return start, None, True
-
-            e_month = MONTH_MAP.get(e_raw)
-            e_year = int(gd["eyr"]) if gd.get("eyr") else s_year
-            if e_month:
-                end = f"{e_year:04d}-{e_month:02d}"
-                return start, end, False
-
-        if gd.get("smo") and gd.get("syr"):
-            s_month = int(gd["smo"])
-            s_year = int(gd["syr"])
-            if not (1 <= s_month <= 12):
-                continue
-
-            start = f"{s_year:04d}-{s_month:02d}"
-            e_raw = (gd.get("emo") or "").lower()
-
-            if e_raw in PRESENT_WORDS:
-                return start, None, True
-
-            if e_raw.isdigit():
-                e_month = int(e_raw)
-                if not (1 <= e_month <= 12):
-                    continue
-                e_year = int(gd["eyr"]) if gd.get("eyr") else s_year
-                end = f"{e_year:04d}-{e_month:02d}"
-                return start, end, False
-
-        if gd.get("syr") and gd.get("eyr") and not gd.get("smon") and not gd.get("smo"):
-            s_year = int(gd["syr"])
-            e_raw = gd["eyr"].lower()
-
-            start = f"{s_year:04d}"
-            if e_raw in PRESENT_WORDS:
-                return start, None, True
-
-            if e_raw.isdigit():
-                end = f"{int(e_raw):04d}"
-                return start, end, False
-
-    return None
-
-
-def _normalize_two_or_four_digit_year(value: str) -> int | None:
-    if not value.isdigit():
-        return None
-    if len(value) == 4:
-        return int(value)
-    if len(value) == 2:
-        year = int(value)
-        return 2000 + year if year <= 30 else 1900 + year
-    return None
-
-
-def _calculate_experience_years_from_entries(entries: list[dict[str, Any]]) -> float | None:
-    intervals: list[DateInterval] = []
+            skill_candidates.append(cleaned)
 
     for entry in entries:
-        if _should_exclude_experience_entry(entry):
-            logger.info("[EXP_CALC] Excluding entry: %s", entry)
+        for skill in entry.get("skills_used", []) if isinstance(entry.get("skills_used"), list) else []:
+            if isinstance(skill, str):
+                skill_candidates.append(skill)
+
+    return _unique_clean_strings(skill_candidates)
+
+
+def _extract_environment_skills_from_text(text: str) -> list[str]:
+    skills: list[str] = []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    header_pattern = re.compile(
+        r"(?i)^(environment|tech\s*stack|tools\s*used|technologies)\s*:"
+    )
+
+    for line in lines:
+        if not header_pattern.match(line):
+            continue
+        payload = header_pattern.sub("", line).strip()
+        if not payload:
             continue
 
-        interval = _entry_to_interval(entry)
-        if interval:
-            intervals.append(interval)
-            logger.info(
-                "[EXP_CALC] Counted entry company=%s title=%s start=%s end=%s",
-                entry.get("company"),
-                entry.get("title"),
-                entry.get("start_date"),
-                entry.get("end_date") if entry.get("end_date") else "PRESENT",
+        for part in re.split(r",|;|\|", payload):
+            token = _clean_string(part)
+            if not token:
+                continue
+            token = re.sub(r"^[\-\u2022•\s]+", "", token).strip()
+            token = re.sub(r"[.]+$", "", token).strip()
+            if not token:
+                continue
+            # Avoid capturing plain labels as skills.
+            if token.lower() in {"environment", "tools", "technologies"}:
+                continue
+            skills.append(token)
+
+    return _unique_clean_strings(skills)
+
+
+def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
+    block = _extract_section_block(
+        text,
+        r"\b(certifications?|education\s*/\s*certi\w*\s*/\s*training)\b",
+        max_lines=40,
+    )
+    if not block:
+        return []
+
+    certs: list[dict[str, Any]] = []
+    for line in block:
+        if not re.search(r"(certified|certification|csm|istqb|six sigma|ncfm|qtp|quality center)", line, re.IGNORECASE):
+            continue
+        name = _clean_string(re.sub(r"^[•*\-\s]+", "", line))
+        if name:
+            certs.append(
+                {
+                    "name": name,
+                    "issuer": None,
+                    "date": None,
+                    "credential_id": None,
+                }
             )
-        else:
-            logger.info("[EXP_CALC] Could not parse dates for entry: %s", entry)
+    return certs
 
-    if not intervals:
-        logger.info("[EXP_CALC] No valid intervals found")
+
+def _extract_professional_summary_from_text(text: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        if re.fullmatch(r"professional summary:?", line, re.IGNORECASE):
+            parts: list[str] = []
+            for nxt in lines[idx + 1 : idx + 8]:
+                if re.fullmatch(r"[A-Z][A-Z /\-&]{3,}:?", nxt):
+                    break
+                if re.fullmatch(r"[A-Za-z][A-Za-z /\-&]{3,}:", nxt):
+                    break
+                parts.append(nxt)
+                if len(parts) >= 3:
+                    break
+            merged = _clean_string(" ".join(parts))
+            if merged:
+                return merged
+    return None
+
+
+def _count_date_ranges(text: str) -> int:
+    return (
+        len(DATE_RANGE_MONTH_PATTERN.findall(text))
+        + len(DATE_RANGE_NUMERIC_PATTERN.findall(text))
+        + len(DATE_RANGE_YEAR_PATTERN.findall(text))
+    )
+
+
+def _normalize_month_token(token: str | None) -> int | None:
+    if not token:
+        return None
+    cleaned = token.strip().lower().rstrip(".")
+    return MONTH_MAP.get(cleaned)
+
+
+def _normalize_year_token(token: str | None) -> int | None:
+    if not token:
+        return None
+    cleaned = token.strip()
+    if not cleaned.isdigit():
+        return None
+    if len(cleaned) == 4:
+        return int(cleaned)
+    if len(cleaned) == 2:
+        value = int(cleaned)
+        return 2000 + value if value <= 30 else 1900 + value
+    return None
+
+
+def _normalize_date_token(token: str | None, *, is_end: bool) -> str | None:
+    if not token:
+        return None
+    value = token.strip()
+    if not value:
         return None
 
-    merged = _merge_intervals(intervals)
-    total_months = sum(_months_inclusive(iv.start, iv.end) for iv in merged)
-    years = round(total_months / 12.0, 1)
+    if value.lower() in PRESENT_WORDS:
+        return "Present"
 
-    logger.info("[EXP_CALC] merged_intervals=%s total_months=%s years=%s", merged, total_months, years)
-    return years
+    if re.fullmatch(r"\d{4}-\d{2}", value):
+        return value
+    if re.fullmatch(r"\d{4}", value):
+        return value
+
+    m = re.fullmatch(r"(?i)\s*(" + MONTH_NAME_PATTERN + r")\s*[’',/-]?\s*(\d{2,4})\s*", value)
+    if m:
+        month = _normalize_month_token(m.group(1))
+        year = _normalize_year_token(m.group(2))
+        if month and year:
+            return f"{year:04d}-{month:02d}"
+
+    m = re.fullmatch(r"\s*(\d{1,2})/(\d{4})\s*", value)
+    if m:
+        month = int(m.group(1))
+        year = int(m.group(2))
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}"
+
+    m = re.search(r"\b(\d{4})\b", value)
+    if m:
+        return m.group(1)
+
+    return None
 
 
-def _build_experience_calculation(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    role_rows: list[dict[str, Any]] = []
-    counted_intervals: list[DateInterval] = []
+def _extract_date_range_from_text(text: str) -> tuple[str | None, str | None, bool]:
+    m = DATE_RANGE_MONTH_APOS_PATTERN.search(text)
+    if m:
+        start_year = _normalize_year_token(m.group("sy"))
+        if start_year is None:
+            return None, None, False
+        start = _normalize_date_token(f"{m.group('smon')} {start_year}", is_end=False)
+        if m.group("present"):
+            return start, "Present", True
+        end_year = _normalize_year_token(m.group("ey"))
+        if end_year is None:
+            return start, None, False
+        end = _normalize_date_token(f"{m.group('emon')} {end_year}", is_end=True)
+        return start, end, False
 
-    for entry in entries:
-        excluded = _should_exclude_experience_entry(entry)
-        interval = None if excluded else _entry_to_interval(entry)
-        months = _months_inclusive(interval.start, interval.end) if interval else None
-        status = "counted" if interval else "excluded" if excluded else "missing_dates"
-        reason = None
-        if excluded:
-            reason = "excluded_non_professional_entry"
-        elif interval is None:
-            reason = "missing_or_invalid_dates"
+    m = DATE_RANGE_ISO_PATTERN.search(text)
+    if m:
+        start = _normalize_date_token(m.group("siso"), is_end=False)
+        if m.group("present"):
+            return start, "Present", True
+        end = _normalize_date_token(m.group("eiso"), is_end=True)
+        return start, end, False
 
-        if interval:
-            counted_intervals.append(interval)
+    m = DATE_RANGE_MONTH_PATTERN.search(text)
+    if m:
+        start = _normalize_date_token(f"{m.group('smon')} {m.group('syear')}", is_end=False)
+        if m.group("present"):
+            return start, "Present", True
+        end = _normalize_date_token(f"{m.group('emon')} {m.group('eyear')}", is_end=True)
+        return start, end, False
 
-        role_rows.append(
+    m = DATE_RANGE_NUMERIC_PATTERN.search(text)
+    if m:
+        start = _normalize_date_token(f"{m.group('sm')}/{m.group('sy')}", is_end=False)
+        if m.group("present"):
+            return start, "Present", True
+        end = _normalize_date_token(f"{m.group('em')}/{m.group('ey')}", is_end=True)
+        return start, end, False
+
+    m = DATE_RANGE_YEAR_PATTERN.search(text)
+    if m:
+        start = _normalize_date_token(m.group("sy"), is_end=False)
+        if m.group("present"):
+            return start, "Present", True
+        end = _normalize_date_token(m.group("ey"), is_end=True)
+        return start, end, False
+
+    return None, None, False
+
+
+def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
+    lines = [line.strip() for line in _extract_work_experience_block(text).splitlines() if line.strip()]
+    entries: list[dict[str, Any]] = []
+
+    for idx, line in enumerate(lines):
+        start_date, end_date, is_current = _extract_date_range_from_text(line)
+        if not start_date and not end_date and not is_current:
+            continue
+
+        company_part = re.split(r"\s+-\s+", line, maxsplit=1)[0].strip()
+        location_match = re.search(r"\b([A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+))(?:\s*/\s*[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+))*\b", company_part)
+        location = _clean_string(location_match.group(1)) if location_match else None
+        company = _clean_string(re.sub(r",\s*[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+).*$", "", company_part))
+
+        title = None
+        if idx + 1 < len(lines):
+            next_line = lines[idx + 1]
+            if len(next_line.split()) <= 14 and not re.search(r"(role and responsibilities|technologies|project|education)", next_line, re.IGNORECASE):
+                title = _clean_string(next_line)
+
+        entries.append(
             {
-                "company": entry.get("company"),
-                "title": entry.get("title"),
-                "location": entry.get("location") or entry.get("candidate_location_from_role"),
-                "start_date": entry.get("start_date"),
-                "end_date": entry.get("end_date"),
-                "is_current": bool(entry.get("is_current")),
-                "status": status,
-                "months_counted": months,
-                "reason": reason,
+                "company": company,
+                "title": title,
+                "location": location,
+                "start_date": start_date,
+                "end_date": end_date,
+                "is_current": bool(is_current),
+                "employment_type": None,
+                "description": None,
+                "skills_used": [],
+                "achievements": [],
             }
         )
 
-    merged = _merge_intervals(counted_intervals) if counted_intervals else []
-    merged_rows = [
-        {
-            "start_date": iv.start.isoformat(),
-            "end_date": iv.end.isoformat(),
-            "months": _months_inclusive(iv.start, iv.end),
-        }
-        for iv in merged
+    cleaned_entries = [
+        item
+        for item in entries
+        if item.get("company") or item.get("title") or item.get("start_date") or item.get("end_date")
     ]
-    total_months = sum(item["months"] for item in merged_rows)
-    total_years = round(total_months / 12.0, 1) if total_months else None
-
-    return {
-        "roles": role_rows,
-        "merged_intervals": merged_rows,
-        "total_months": total_months,
-        "total_years": total_years,
-    }
+    return sort_experience_entries(cleaned_entries)
 
 
-def _calculate_experience_years_from_raw_text(text: str) -> float | None:
+def _extract_work_experience_block(text: str) -> str:
+    lines = text.splitlines()
+    start_idx: int | None = None
+    end_idx: int | None = None
+
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if start_idx is None and re.fullmatch(
+            r"(?i)(work experience|professional experience|employment history|career history|work history|relevant experience|industry experience|consulting experience|experience)",
+            line.rstrip(":"),
+        ):
+            start_idx = i + 1
+            continue
+
+        if start_idx is not None and re.fullmatch(
+            r"(?i)(education|skills|certifications|additional information|technical skills)",
+            line.rstrip(":"),
+        ):
+            end_idx = i
+            break
+
+    if start_idx is None:
+        return text
+    if end_idx is None:
+        end_idx = len(lines)
+    return "\n".join(lines[start_idx:end_idx])
+
+
+def estimate_experience_years_from_text(text: str) -> float | None:
+    entries = _extract_experience_entries_from_text(text)
+    return calculate_experience_years_from_entries(entries)
+
+
+def count_date_ranges_in_text(text: str) -> int:
+    return _count_date_ranges(text)
+
+
+def _clean_education_date_string(value: Any) -> str | None:
+    normalized = _clean_date_string(value)
+    if normalized and re.fullmatch(r"\d{4}", normalized):
+        return f"{normalized}-06"
+    return normalized
+
+
+def _trim_experience_description(value: Any, max_sentences: int = 20) -> str | None:
+    cleaned = _clean_string(value)
+    if not cleaned:
+        return None
+
+    # Keep full sentences only, capped to a manageable size per experience block.
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+", cleaned)
+        if part and part.strip()
+    ]
+    if len(sentences) <= max_sentences:
+        return cleaned
+
+    return " ".join(sentences[:max_sentences]).strip()
+
+
+def normalize_resume_text(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+
+    text = text.replace("\x00", " ")
+    text = re.sub(r"\r\n?", "\n", text)
+
+    # Merge likely broken PDF line wraps such as:
+    # "Progressive Web" + "Apps" -> "Progressive Web Apps"
+    lines = text.split("\n")
+    merged_lines = []
+    i = 0
+
+    while i < len(lines):
+        current = lines[i].strip()
+
+        if i < len(lines) - 1:
+            nxt = lines[i + 1].strip()
+
+            if (
+                current
+                and nxt
+                and len(current.split()) <= 3
+                and len(nxt.split()) <= 2
+                and not current.endswith(":")
+                and not nxt.isupper()
+                and not re.fullmatch(r"\d{4}(-\d{2})?", current)
+                and not re.fullmatch(r"\d{4}(-\d{2})?", nxt)
+            ):
+                merged_lines.append(f"{current} {nxt}")
+                i += 2
+                continue
+
+        merged_lines.append(current)
+        i += 1
+
+    text = "\n".join(merged_lines)
+
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _clean_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = re.sub(r"\s+", " ", value).strip()
+    return value or None
+
+
+def _unique_clean_strings(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+
+    for value in values:
+        cleaned = _clean_string(value)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(cleaned)
+
+    return result
+
+
+def _clean_date_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip()
+    normalized = _normalize_date_token(value, is_end=False)
+    if normalized:
+        return normalized
+
+    inferred_start, inferred_end, inferred_current = _extract_date_range_from_text(value)
+    if inferred_current:
+        return "Present"
+    if inferred_start and not inferred_end:
+        return inferred_start
+    if inferred_end:
+        return inferred_end
+    return None
+
+
+def sort_experience_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sort_key(entry: dict[str, Any]) -> tuple[int, int, int]:
+        is_current = 1 if entry.get("is_current") is True else 0
+        end_rank = _date_sort_rank(entry.get("end_date"), present_high=True)
+        start_rank = _date_sort_rank(entry.get("start_date"), present_high=False)
+        return (is_current, end_rank, start_rank)
+
+    return sorted(entries, key=sort_key, reverse=True)
+
+
+def _date_sort_rank(value: Any, *, present_high: bool) -> int:
+    if not isinstance(value, str):
+        return -1
+    if value == "Present":
+        return 999999 if present_high else -1
+    if re.fullmatch(r"\d{4}-\d{2}", value):
+        y, m = value.split("-")
+        return int(y) * 100 + int(m)
+    if re.fullmatch(r"\d{4}", value):
+        return int(value) * 100
+    return -1
+
+
+def derive_highest_degree(education_entries: list[dict[str, Any]]) -> str | None:
+    best_degree = None
+    best_rank = -1
+
+    for entry in education_entries:
+        degree = entry.get("degree")
+        if not isinstance(degree, str):
+            continue
+        rank = _rank_degree(degree)
+        if rank > best_rank:
+            best_rank = rank
+            best_degree = degree
+
+    return best_degree
+
+
+def _rank_degree(degree: str) -> int:
+    normalized = degree.lower().strip()
+    for key, rank in DEGREE_RANK.items():
+        if key in normalized:
+            return rank
+    return 0
+
+
+def derive_current_last_job(experience_entries: list[dict[str, Any]]) -> str | None:
+    if not experience_entries:
+        return None
+
+    sorted_entries = sort_experience_entries(experience_entries)
+    for entry in sorted_entries:
+        title = entry.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    return None
+
+
+def calculate_experience_years_from_entries(entries: list[dict[str, Any]]) -> float | None:
     intervals: list[DateInterval] = []
 
-    for block in extract_job_blocks(text):
-        interval = _extract_date_interval_from_block(block)
+    for entry in entries:
+        interval = _entry_to_interval(entry)
         if interval:
             intervals.append(interval)
-
-    if not intervals:
-        for line in text.splitlines():
-            interval = _extract_date_interval_from_line(line)
-            if interval:
-                intervals.append(interval)
 
     if not intervals:
         return None
@@ -1561,43 +1006,15 @@ def _calculate_experience_years_from_raw_text(text: str) -> float | None:
     return round(total_months / 12.0, 1)
 
 
-def _should_exclude_experience_entry(entry: dict[str, Any]) -> bool:
-    text = " ".join(
-        x for x in [
-            entry.get("title"),
-            entry.get("company"),
-            entry.get("employment_type"),
-            entry.get("section"),
-        ]
-        if isinstance(x, str)
-    ).lower()
-
-    if any(re.search(rf"\b{re.escape(keyword)}\b", text) for keyword in DEGREE_KEYWORDS):
-        return True
-
-    # Keep internships by default.
-    # To exclude them, uncomment below:
-    # if "intern" in text:
-    #     return True
-
-    if "volunteer" in text:
-        return True
-    if "teaching assistant" in text or "research assistant" in text or "graduate assistant" in text:
-        return True
-
-    return False
-
-
 def _entry_to_interval(entry: dict[str, Any]) -> DateInterval | None:
     start = _parse_normalized_date(entry.get("start_date"), is_end=False)
     end = _parse_normalized_date(entry.get("end_date"), is_end=True)
 
-    if entry.get("is_current"):
+    if entry.get("is_current") is True:
         end = date.today()
 
     if not start or not end:
         return None
-
     if end < start:
         return None
 
@@ -1610,9 +1027,12 @@ def _parse_normalized_date(value: Any, *, is_end: bool) -> date | None:
 
     value = value.strip()
 
+    if value == "Present":
+        return date.today()
+
     if re.fullmatch(r"\d{4}-\d{2}", value):
         year, month = map(int, value.split("-"))
-        if month < 1 or month > 12:
+        if not (1 <= month <= 12):
             return None
         if is_end:
             last_day = calendar.monthrange(year, month)[1]
@@ -1621,9 +1041,7 @@ def _parse_normalized_date(value: Any, *, is_end: bool) -> date | None:
 
     if re.fullmatch(r"\d{4}", value):
         year = int(value)
-        if is_end:
-            return date(year, 12, 31)
-        return date(year, 1, 1)
+        return date(year, 12, 31) if is_end else date(year, 1, 1)
 
     return None
 
@@ -1652,185 +1070,43 @@ def _months_inclusive(start: date, end: date) -> int:
     return (end.year - start.year) * 12 + (end.month - start.month) + 1
 
 
-def _extract_explicit_experience_years(text: str) -> float | None:
-    values: list[float] = []
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    for line in lines[:60]:
-        lowered = line.lower()
-        matches = list(EXPLICIT_EXPERIENCE_PATTERN.finditer(line))
-        if not matches and "summary" not in lowered and "objective" not in lowered:
-            matches = [
-                match
-                for match in ALT_EXPLICIT_EXPERIENCE_PATTERN.finditer(line)
-                if any(keyword in lowered for keyword in ("experience", "business analyst", "developer", "engineer", "analyst", "consultant", "architect", "administrator", "manager"))
-            ]
-        if not matches and any(noise in lowered for noise in EXPLICIT_NOISE_WORDS):
-            continue
-        for match in matches:
-            years_str = match.group("years")
-            try:
-                values.append(float(years_str))
-            except ValueError:
-                continue
-
-    if not values:
+def derive_seniority_level(current_last_job: str | None) -> str | None:
+    if not current_last_job:
         return None
 
-    return round(max(values), 1)
+    title = current_last_job.lower()
+    if any(x in title for x in ["principal", "staff", "director", "head", "vp", "vice president"]):
+        return "Principal+"
+    if any(x in title for x in ["lead", "manager"]):
+        return "Lead/Manager"
+    if "senior" in title:
+        return "Senior"
+    if any(x in title for x in ["associate", "junior", "intern"]):
+        return "Junior/Associate"
+    return "Mid"
 
 
-def _extract_work_excerpt(text: str) -> str:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return text[:3000]
+def derive_primary_domain(
+    current_last_job: str | None,
+    entries: list[dict[str, Any]],
+    skills: list[str],
+) -> str | None:
+    parts = [current_last_job or ""]
+    parts.extend(entry.get("title") or "" for entry in entries if isinstance(entry, dict))
+    parts.extend(skills if isinstance(skills, list) else [])
+    text = " ".join(parts).lower()
 
-    start_idx = None
-    end_idx = None
+    rules = [
+        ("Mobile Engineering", ["ios", "android", "flutter", "react native", "mobile"]),
+        ("Frontend Engineering", ["frontend", "ui engineer", "react", "angular", "vue", "css"]),
+        ("Backend Engineering", ["backend", "api developer", "server-side", "microservices", "golang", "go", "php", "rails"]),
+        ("Data Engineering", ["data engineer", "etl", "spark", "airflow", "warehouse"]),
+        ("ML/AI Engineering", ["llm", "machine learning", "ml engineer", "rag", "bedrock", "llamaindex", "openai api", "anthropic"]),
+        ("DevOps/Platform", ["devops", "platform", "terraform", "kubernetes", "ci/cd"]),
+    ]
 
-    # Find a real section header line
-    for idx, line in enumerate(lines):
-        if WORK_START_PATTERN.match(line):
-            start_idx = idx + 1
-            break
+    for label, keywords in rules:
+        if any(keyword in text for keyword in keywords):
+            return label
 
-    if start_idx is None:
-        # fallback: try to find an all-caps EXPERIENCE header
-        for idx, line in enumerate(lines):
-            normalized = re.sub(r"\s+", " ", line).strip().lower()
-            if normalized in {
-                "experience",
-                "work experience",
-                "professional experience",
-                "employment history",
-            }:
-                start_idx = idx + 1
-                break
-
-    if start_idx is None:
-        logger.warning("[LLM_PARSE] Could not find experience section header")
-        return "\n".join(lines[:150])
-
-    for idx in range(start_idx, len(lines)):
-        if WORK_END_PATTERN.match(lines[idx]):
-            end_idx = idx
-            break
-
-    if end_idx is None:
-        end_idx = len(lines)
-
-    excerpt = "\n".join(lines[start_idx:end_idx]).strip()
-    if excerpt:
-        return excerpt
-
-    print("==== EXTRACT_WORK_EXCERPT START IDX ====", start_idx)
-    print("==== EXTRACT_WORK_EXCERPT END IDX ====", end_idx)
-    return "\n".join(lines[start_idx:start_idx + 150])
-
-
-def _extract_header_excerpt(text: str, max_lines: int = 35) -> str:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    return "\n".join(lines[:max_lines])
-
-def _line_contains_date_range(text: str) -> bool:
-    return _extract_date_interval_from_line(text) is not None
-
-
-def _extract_date_interval_from_block(block: str) -> DateInterval | None:
-    for line in block.splitlines():
-        interval = _extract_date_interval_from_line(line)
-        if interval:
-            return interval
-    return None
-
-
-def _extract_date_interval_from_line(line: str) -> DateInterval | None:
-    today = date.today()
-
-    for pattern in DATE_RANGE_PATTERNS:
-        match = pattern.search(line)
-        if not match:
-            continue
-
-        gd = match.groupdict()
-
-        if gd.get("smon") and gd.get("syr"):
-            s_month = MONTH_MAP.get(gd["smon"].lower())
-            s_year = int(gd["syr"])
-            if not s_month:
-                continue
-
-            e_raw = (gd.get("emon") or "").lower()
-            if e_raw in PRESENT_WORDS:
-                return DateInterval(date(s_year, s_month, 1), today)
-
-            e_month = MONTH_MAP.get(e_raw)
-            e_year = int(gd["eyr"]) if gd.get("eyr") else s_year
-            if e_month:
-                last_day = calendar.monthrange(e_year, e_month)[1]
-                return DateInterval(date(s_year, s_month, 1), date(e_year, e_month, last_day))
-
-        if gd.get("smo") and gd.get("syr"):
-            s_month = int(gd["smo"])
-            s_year = int(gd["syr"])
-            if not (1 <= s_month <= 12):
-                continue
-
-            e_raw = (gd.get("emo") or "").lower()
-            if e_raw in PRESENT_WORDS:
-                return DateInterval(date(s_year, s_month, 1), today)
-
-            if e_raw.isdigit():
-                e_month = int(e_raw)
-                if not (1 <= e_month <= 12):
-                    continue
-                e_year = int(gd["eyr"]) if gd.get("eyr") else s_year
-                last_day = calendar.monthrange(e_year, e_month)[1]
-                return DateInterval(date(s_year, s_month, 1), date(e_year, e_month, last_day))
-
-        if gd.get("syr") and gd.get("eyr") and not gd.get("smon") and not gd.get("smo"):
-            s_year = int(gd["syr"])
-            e_raw = gd["eyr"].lower()
-            if e_raw in PRESENT_WORDS:
-                return DateInterval(date(s_year, 1, 1), today)
-            if e_raw.isdigit():
-                e_year = int(e_raw)
-                return DateInterval(date(s_year, 1, 1), date(e_year, 12, 31))
-
-    return None
-
-
-def _unique_clean_strings(values: list[Any]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-
-    for value in values:
-        cleaned = _clean_string(value)
-        if not cleaned:
-            continue
-        key = cleaned.lower()
-        if key not in seen:
-            seen.add(key)
-            result.append(cleaned)
-
-    return result
-
-
-def _clean_string(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    value = re.sub(r"\s+", " ", value).strip()
-    return value or None
-
-
-def _clean_date_string(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-
-    value = value.strip()
-    if re.fullmatch(r"\d{4}-\d{2}", value):
-        return value
-    if re.fullmatch(r"\d{4}", value):
-        return value
     return None

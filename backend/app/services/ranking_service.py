@@ -91,6 +91,28 @@ def _resolve_job_location(job: Job | None) -> str | None:
     return None
 
 
+def _resolve_candidate_location(
+    parsed_json: dict[str, Any], candidate: Candidate, resume: Resume
+) -> str | None:
+    parsed_location = parsed_json.get("candidate_location")
+    if isinstance(parsed_location, str) and parsed_location.strip():
+        return parsed_location.strip()
+
+    if candidate.location and candidate.location.strip():
+        return candidate.location.strip()
+
+    raw_text = resume.raw_text or ""
+    match = LOCATION_IN_TEXT_PATTERN.search(raw_text)
+    if match:
+        return match.group(1).strip()
+
+    fallback = CITY_STATE_PATTERN.search(raw_text)
+    if fallback:
+        return fallback.group(1).strip()
+
+    return None
+
+
 def _skill_score(job: Job, resume_skills: list[str]) -> tuple[float, list[str], list[str]]:
     resume_set = {skill.lower() for skill in resume_skills}
     required = [skill for skill in (job.required_skills or []) if skill]
@@ -641,7 +663,7 @@ def get_rankings_for_job(
         elif highest_degree and not isinstance(degree, str):
             continue
 
-        candidate_location = parsed_json.get("candidate_location") or candidate.location
+        candidate_location = _resolve_candidate_location(parsed_json, candidate, resume)
         resume_distance = parsed_json.get("distance_miles")
         if not isinstance(resume_distance, (int, float)):
             computed_distance = distance_miles_between(job_location, candidate_location)

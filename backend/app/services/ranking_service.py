@@ -5,8 +5,10 @@ import json
 import os
 import re
 import uuid
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urlencode
 
 from sqlalchemy import delete, desc, select
@@ -16,22 +18,57 @@ from app.db.models import AuditLog, Candidate, Job, JobResume, Ranking, Recruite
 from app.services.embedding_service import (
     EMBEDDING_MODEL,
     cosine_similarity_percent,
+    embed_text,
     get_or_create_job_embedding,
     get_or_create_resume_embedding,
 )
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
-from app.services.scoring import weighted_score
 
-SCORING_VERSION = "score_v4_structured_rubric_evidence"
+SCORING_VERSION = "score_v6_structured_v3_resume_ranking"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
-ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "false").lower() == "true"
+ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"
 LLM_SCORE_WEIGHT = float(os.getenv("LLM_SCORE_WEIGHT", "0.2"))
 LLM_CONFIDENCE_WEIGHT = float(os.getenv("LLM_CONFIDENCE_WEIGHT", "0.3"))
-GPT_ONLY_RANKING = os.getenv("GPT_ONLY_RANKING", "true").lower() == "true"
+GPT_ONLY_RANKING = os.getenv("GPT_ONLY_RANKING", "false").lower() == "true"
+ENABLE_SECTION_SEMANTIC = os.getenv("ENABLE_SECTION_SEMANTIC", "true").lower() == "true"
+SEMANTIC_FULL_WEIGHT = float(os.getenv("SEMANTIC_FULL_WEIGHT", "0.45"))
+SEMANTIC_SKILLS_WEIGHT = float(os.getenv("SEMANTIC_SKILLS_WEIGHT", "0.30"))
+SEMANTIC_EXPERIENCE_WEIGHT = float(os.getenv("SEMANTIC_EXPERIENCE_WEIGHT", "0.20"))
+SEMANTIC_PROJECTS_WEIGHT = float(os.getenv("SEMANTIC_PROJECTS_WEIGHT", "0.05"))
+
+def _infer_job_seniority(job: Job) -> str:
+    text = " ".join(
+        part.strip()
+        for part in [str(job.title or ""), str(job.description or "")]
+        if str(part or "").strip()
+    ).lower()
+
+    if not text:
+        return ""
+
+    patterns = [
+        ("principal+", [r"\bprincipal\b", r"\bstaff\b", r"\bdistinguished\b", r"\barchitect\b"]),
+        ("lead/manager", [r"\blead\b", r"\bmanager\b", r"\bdirector\b", r"\bhead\b"]),
+        ("senior", [r"\bsenior\b", r"\bsr\.?\b"]),
+        ("mid", [r"\bmid\b", r"\bintermediate\b", r"\bii\b", r"\b2\b"]),
+        ("junior/associate", [r"\bjunior\b", r"\bassociate\b", r"\bentry[- ]level\b", r"\bnew grad\b", r"\bintern\b", r"\btrainee\b"]),
+    ]
+
+    for label, regexes in patterns:
+        if any(re.search(regex, text, re.IGNORECASE) for regex in regexes):
+            return label
+
+    return ""
 INTERVIEW_TASK_EVENT = "interview_task_upsert"
 INTERVIEW_TASK_STATUSES = {"pending", "scheduled", "completed", "cancelled"}
+
+LOCATION_IN_TEXT_PATTERN = re.compile(
+    r"(?:location|based in)\s*[:\-]\s*([A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)(?:,\s*(?:USA|US|United States))?)",
+    re.IGNORECASE,
+)
+CITY_STATE_PATTERN = re.compile(r"\b([A-Za-z .'-]+,\s*[A-Z]{2})\b")
 
 
 @dataclass
@@ -67,13 +104,6 @@ def _semantic_score_fallback(job_description: str, resume_text: str) -> float:
         return 0.0
     overlap = job_tokens.intersection(resume_tokens)
     return round((len(overlap) / len(job_tokens)) * 100.0, 2)
-
-
-LOCATION_IN_TEXT_PATTERN = re.compile(
-    r"(?:location|based in)\s*[:\-]\s*([A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)(?:,\s*(?:USA|US|United States))?)",
-    re.IGNORECASE,
-)
-CITY_STATE_PATTERN = re.compile(r"\b([A-Za-z .'-]+,\s*[A-Z]{2})\b")
 
 
 def _resolve_job_location(job: Job | None) -> str | None:
@@ -113,51 +143,491 @@ def _resolve_candidate_location(
     return None
 
 
-def _skill_score(job: Job, resume_skills: list[str]) -> tuple[float, list[str], list[str]]:
-    resume_set = {skill.lower() for skill in resume_skills}
-    required = [skill for skill in (job.required_skills or []) if skill]
-    nice = [skill for skill in (job.nice_to_have_skills or []) if skill]
+def _normalize_skill_names(skills: list[str]) -> list[str]:
+    alias_map = {
+        "js": "javascript",
+        "javascript": "javascript",
+        "ts": "typescript",
+        "react js": "react",
+        "reactjs": "react",
+        "node": "node js",
+        "nodejs": "node js",
+        "node js": "node js",
+        "golang": "go",
+        "postgres": "postgresql",
+        "postgres sql": "postgresql",
+        "aws amplify": "aws amplify",
+        "aws bedrock": "aws bedrock",
+        "open ai api": "openai api",
+        "openai api": "openai api",
+        "gcp": "gcp",
+        "ci/cd": "ci/cd",
+        "rag architecture": "rag architecture",
+        "cloudflare pages": "cloudflare pages",
+        "progressive web apps": "progressive web apps",
+        "material ui": "material ui",
+        "tailwind css": "tailwind css",
+        "share point": "sharepoint",
+        "sharepoint online": "sharepoint",
+        "microsoft sharepoint": "sharepoint",
+    }
 
-    matched_required = [skill for skill in required if skill.lower() in resume_set]
-    matched_nice = [skill for skill in nice if skill.lower() in resume_set]
-    missing_required = [skill for skill in required if skill.lower() not in resume_set]
+    out: list[str] = []
+    seen: set[str] = set()
 
-    raw = (len(matched_required) * 10) + (len(matched_nice) * 5) - (len(missing_required) * 15)
-    max_raw = (len(required) * 10) + (len(nice) * 5)
-    min_raw = -(len(required) * 15)
-    if max_raw == min_raw:
-        normalized = 50.0
+    for skill in skills:
+        raw = str(skill or "").strip()
+        if not raw:
+            continue
+        normalized = re.sub(r"[^a-zA-Z0-9+#]+", " ", raw).strip().lower()
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = alias_map.get(normalized, normalized)
+        if normalized not in seen:
+            seen.add(normalized)
+            out.append(normalized)
+
+    return out
+
+
+def _skills_match(required_skill: str, candidate_skill: str) -> bool:
+    if not required_skill or not candidate_skill:
+        return False
+    if required_skill == candidate_skill:
+        return True
+
+    req_tokens = set(required_skill.split())
+    cand_tokens = set(candidate_skill.split())
+    if not req_tokens or not cand_tokens:
+        return False
+
+    # Handles variants like "sharepoint online" vs "sharepoint".
+    if req_tokens.issubset(cand_tokens) or cand_tokens.issubset(req_tokens):
+        return True
+
+    # Lightweight fuzzy match for close lexical variants that survive normalization.
+    if len(required_skill) >= 5 and len(candidate_skill) >= 5:
+        if SequenceMatcher(a=required_skill, b=candidate_skill).ratio() >= 0.88:
+            return True
+
+    return False
+
+
+def _critical_required_skills(job: Job, required_skills: list[str]) -> set[str]:
+    description = str(job.description or "")
+    if not description.strip():
+        return set()
+
+    critical: set[str] = set()
+    for skill in required_skills:
+        skill_clean = str(skill).strip()
+        if not skill_clean:
+            continue
+        escaped = re.escape(skill_clean)
+        critical_patterns = [
+            rf"(must have|required|mandatory)\s*[:\-]?\s*[^.\n]{{0,100}}\b{escaped}\b",
+            rf"\b{escaped}\b[^.\n]{{0,100}}(must have|required|mandatory)",
+        ]
+        if any(re.search(pattern, description, re.IGNORECASE) for pattern in critical_patterns):
+            critical.add(skill_clean.lower())
+    return critical
+
+
+def _extract_candidate_features(resume: Resume) -> dict[str, Any]:
+    parsed = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
+
+    top_skills = parsed.get("skills", [])
+    top_skills = [str(s) for s in top_skills] if isinstance(top_skills, list) else []
+
+    experience_entries = parsed.get("experience_entries", [])
+    experience_entries = experience_entries if isinstance(experience_entries, list) else []
+
+    projects = parsed.get("projects", [])
+    projects = projects if isinstance(projects, list) else []
+
+    certs = parsed.get("certifications", [])
+    certs = certs if isinstance(certs, list) else []
+
+    role_skills: list[str] = []
+    role_titles: list[str] = []
+    role_descriptions: list[str] = []
+
+    for entry in experience_entries:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()
+        if title:
+            role_titles.append(title)
+
+        desc = str(entry.get("description") or "").strip()
+        if desc:
+            role_descriptions.append(desc)
+
+        skills_used = entry.get("skills_used", [])
+        if isinstance(skills_used, list):
+            role_skills.extend(str(s) for s in skills_used if s)
+
+    project_tech: list[str] = []
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        tech = project.get("technologies", [])
+        if isinstance(tech, list):
+            project_tech.extend(str(t) for t in tech if t)
+
+    cert_names: list[str] = []
+    for cert in certs:
+        if isinstance(cert, dict) and cert.get("name"):
+            cert_names.append(str(cert["name"]))
+
+    fallback_skills = [str(skill) for skill in (resume.skills_json or [])] if isinstance(resume.skills_json, list) else []
+
+    all_skills = _normalize_skill_names(top_skills + role_skills + project_tech + fallback_skills)
+
+    return {
+        "skills": all_skills,
+        "titles": role_titles,
+        "descriptions": role_descriptions,
+        "projects": projects,
+        "primary_domain": parsed.get("primary_domain"),
+        "seniority_level": parsed.get("seniority_level"),
+        "experience_years": resume.experience_years,
+        "certifications": cert_names,
+        "highest_degree": parsed.get("highest_degree"),
+        "raw_text": resume.raw_text or "",
+        "parsed_json": parsed,
+    }
+
+
+def _build_job_semantic_text(job: Job) -> str:
+    required = ", ".join(str(skill).strip().lower() for skill in (job.required_skills or []) if skill)
+    preferred = ", ".join(
+        str(skill).strip().lower() for skill in (job.nice_to_have_skills or []) if skill
+    )
+    domains = ", ".join(str(tag).strip().lower() for tag in (job.domain_tags or []) if tag)
+    parts = [
+        f"job title: {str(job.title or '').strip().lower()}",
+        f"Required Skills: {required}",
+        f"Preferred Skills: {preferred}",
+        f"Domain Tags: {domains}",
+        f"Job Description: {str(job.description or '')[:2400].lower()}",
+    ]
+    return "\n".join(part for part in parts if part.strip())
+
+
+def _build_resume_semantic_sections(candidate_features: dict[str, Any], resume_text: str) -> dict[str, str]:
+    skills = candidate_features.get("skills", [])
+    titles = candidate_features.get("titles", [])
+    descriptions = candidate_features.get("descriptions", [])
+    projects = candidate_features.get("projects", [])
+    parsed_json = candidate_features.get("parsed_json", {})
+
+    project_parts: list[str] = []
+    if isinstance(projects, list):
+        for item in projects[:3]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            desc = str(item.get("description") or "").strip()
+            tech = item.get("technologies")
+            tech_line = ", ".join(str(t) for t in tech[:6]) if isinstance(tech, list) else ""
+            row = " | ".join(part for part in [name, desc, tech_line] if part)
+            if row:
+                project_parts.append(row)
+
+    summary = str(parsed_json.get("professional_summary") or "").strip() if isinstance(parsed_json, dict) else ""
+    current_job = str(parsed_json.get("current_last_job") or "").strip() if isinstance(parsed_json, dict) else ""
+
+    return {
+        "skills": ", ".join(str(skill).strip().lower() for skill in skills[:40])[:1800],
+        "experience": "\n".join(
+            [
+                *(str(title).strip().lower() for title in titles[:6]),
+                *(str(desc).strip().lower() for desc in descriptions[:3]),
+            ]
+        )[:2400],
+        "projects": "\n".join(part.strip().lower() for part in project_parts)[:1600],
+        "summary": " | ".join(part.strip().lower() for part in [summary, current_job] if part)[:1200],
+        "full_text": str(resume_text or "")[:2600].lower(),
+    }
+
+
+def _weighted_section_semantic(
+    job_vector: list[float], resume_sections: dict[str, str], base_semantic: float
+) -> tuple[float, dict[str, float]]:
+    components: dict[str, float] = {"full_text": _clamp_0_100(base_semantic)}
+    weighted_total = components["full_text"] * SEMANTIC_FULL_WEIGHT
+    weight_sum = SEMANTIC_FULL_WEIGHT
+
+    section_weights = {
+        "skills": SEMANTIC_SKILLS_WEIGHT,
+        "experience": SEMANTIC_EXPERIENCE_WEIGHT,
+        "projects": SEMANTIC_PROJECTS_WEIGHT,
+    }
+
+    for key, weight in section_weights.items():
+        text = (resume_sections.get(key) or "").strip()
+        if not text:
+            continue
+        try:
+            section_vector = embed_text(text)
+            section_score = cosine_similarity_percent(job_vector, section_vector)
+        except Exception:
+            continue
+        components[key] = _clamp_0_100(section_score)
+        weighted_total += components[key] * weight
+        weight_sum += weight
+
+    if weight_sum <= 0:
+        return _clamp_0_100(base_semantic), components
+
+    return _clamp_0_100(weighted_total / weight_sum), components
+
+
+def _skill_score(job: Job, candidate_skills: list[str]) -> tuple[float, list[str], list[str]]:
+    candidate_norm = _normalize_skill_names(candidate_skills)
+    required = [str(skill).strip() for skill in (job.required_skills or []) if skill]
+    preferred = [str(skill).strip() for skill in (job.nice_to_have_skills or []) if skill]
+    required_norm = _normalize_skill_names(required)
+    preferred_norm = _normalize_skill_names(preferred)
+
+    matched_required: list[str] = []
+    missing_required: list[str] = []
+    for original, normalized in zip(required, required_norm):
+        if any(_skills_match(normalized, candidate) for candidate in candidate_norm):
+            matched_required.append(original)
+        else:
+            missing_required.append(original)
+
+    matched_preferred: list[str] = []
+    for original, normalized in zip(preferred, preferred_norm):
+        if any(_skills_match(normalized, candidate) for candidate in candidate_norm):
+            matched_preferred.append(original)
+
+    critical_required = _critical_required_skills(job, required)
+    matched_required_critical = [s for s in matched_required if s.lower() in critical_required]
+    matched_required_regular = [s for s in matched_required if s.lower() not in critical_required]
+    total_required_critical = sum(1 for s in required if s.lower() in critical_required)
+    total_required_regular = max(0, len(required) - total_required_critical)
+
+    if required:
+        critical_ratio = (
+            len(matched_required_critical) / total_required_critical if total_required_critical > 0 else 1.0
+        )
+        regular_ratio = (
+            len(matched_required_regular) / total_required_regular if total_required_regular > 0 else 1.0
+        )
+        required_score = ((critical_ratio * 0.70) + (regular_ratio * 0.30)) * 100.0
     else:
-        normalized = ((raw - min_raw) / (max_raw - min_raw)) * 100.0
-    return round(max(0.0, min(100.0, normalized)), 2), matched_required + matched_nice, missing_required
+        required_score = 100.0
+
+    preferred_score = (len(matched_preferred) / len(preferred) * 100.0) if preferred else 100.0
+
+    final = (required_score * 0.75) + (preferred_score * 0.25)
+
+    if missing_required:
+        critical_missing = sum(1 for s in missing_required if s.lower() in critical_required)
+        regular_missing = max(0, len(missing_required) - critical_missing)
+        penalty = (critical_missing * 12.0) + (regular_missing * 6.0)
+        final -= min(35.0, penalty)
+
+    return _clamp_0_100(final), matched_required + matched_preferred, missing_required
 
 
-def _experience_score(min_years: float | None, resume_years: float | None) -> float:
+def _experience_years_score(min_years: float | None, resume_years: float | None) -> float:
     if min_years is None:
         return 100.0
-    if not resume_years or min_years <= 0:
+    if resume_years is None or min_years <= 0:
         return 0.0
-    ratio = (resume_years / min_years) * 100.0
-    return round(max(0.0, min(100.0, ratio)), 2)
 
-
-def _domain_score(domain_tags: list[str], resume_text: str) -> float:
-    if not domain_tags:
+    ratio = resume_years / min_years
+    if ratio >= 1.35:
         return 100.0
+    if ratio >= 1.0:
+        return _clamp_0_100(92.0 + ((ratio - 1.0) / 0.35) * 8.0)
+    if ratio >= 0.8:
+        return _clamp_0_100(75.0 + ((ratio - 0.8) / 0.2) * 17.0)
+    if ratio >= 0.6:
+        return _clamp_0_100(45.0 + ((ratio - 0.6) / 0.2) * 30.0)
+    return _clamp_0_100(ratio * 60.0)
+
+
+def _parse_ym_date(raw: object) -> datetime | None:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    if text in {"present", "current", "now", "till now", "till date", "to date"}:
+        return datetime.now(UTC)
+
+    for fmt in ("%Y-%m", "%Y/%m", "%Y"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.replace(tzinfo=UTC)
+        except ValueError:
+            continue
+
+    return None
+
+
+def _entry_recency_weight(end_date: object) -> float:
+    end_dt = _parse_ym_date(end_date)
+    if not end_dt:
+        return 0.75
+    months_ago = max(
+        0.0,
+        (datetime.now(UTC).year - end_dt.year) * 12 + (datetime.now(UTC).month - end_dt.month),
+    )
+    if months_ago <= 24:
+        return 1.0
+    if months_ago <= 60:
+        return 0.85
+    return 0.70
+
+
+def _experience_relevance_score(job: Job, parsed_json: dict[str, Any]) -> float:
+    entries = parsed_json.get("experience_entries", [])
+    if not isinstance(entries, list) or not entries:
+        return 0.0
+
+    required = [str(skill).lower() for skill in (job.required_skills or []) if skill]
+    if not required:
+        return 100.0
+
+    preferred = [str(skill).lower() for skill in (job.nice_to_have_skills or []) if skill]
+    title_keywords = [
+        token
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9+.#-]{2,}", str(job.title or "").lower())
+        if token not in {"senior", "lead", "manager", "engineer", "developer", "analyst", "specialist"}
+    ]
+
+    weighted_hits = 0.0
+    total_weight = 0.0
+
+    for entry in entries[:4]:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").lower()
+        desc = str(entry.get("description") or "").lower()
+        skills_used = _normalize_skill_names([str(s) for s in (entry.get("skills_used") or []) if s])
+        recency_weight = _entry_recency_weight(entry.get("end_date"))
+
+        entry_score = 0.0
+        for req in required:
+            req_norm = _normalize_skill_names([req])[0] if _normalize_skill_names([req]) else req
+            if req in title or req in desc or any(_skills_match(req_norm, s) for s in skills_used):
+                entry_score += 1.0
+
+        for pref in preferred:
+            pref_norm = _normalize_skill_names([pref])[0] if _normalize_skill_names([pref]) else pref
+            if pref in title or pref in desc or any(_skills_match(pref_norm, s) for s in skills_used):
+                entry_score += 0.4
+
+        if title_keywords:
+            title_hits = sum(1 for token in title_keywords if token in title or token in desc)
+            entry_score += min(1.0, title_hits / max(1, len(title_keywords)))
+
+        weighted_hits += entry_score * recency_weight
+        total_weight += (len(required) + (len(preferred) * 0.4) + 1.0) * recency_weight
+
+    if total_weight <= 0:
+        return 0.0
+
+    return _clamp_0_100((weighted_hits / total_weight) * 100.0)
+
+
+def _seniority_score(job: Job, parsed_json: dict[str, Any]) -> float:
+    desired = _infer_job_seniority(job)
+    actual = str(parsed_json.get("seniority_level") or "").lower().strip()
+
+    if not desired:
+        return 50.0
+    if not actual:
+        return 50.0
+    if desired == actual:
+        return 100.0
+
+    order = {
+        "junior/associate": 1,
+        "mid": 2,
+        "senior": 3,
+        "lead/manager": 4,
+        "principal+": 5,
+    }
+
+    if desired in order and actual in order:
+        diff = abs(order[desired] - order[actual])
+        return _clamp_0_100(100 - (diff * 25))
+
+    return 60.0
+
+
+def _experience_score(job: Job, resume: Resume, parsed_json: dict[str, Any]) -> float:
+    years_score = _experience_years_score(
+        float(job.min_experience_years) if job.min_experience_years is not None else None,
+        float(resume.experience_years) if resume.experience_years is not None else None,
+    )
+    relevance_score = _experience_relevance_score(job, parsed_json)
+    seniority_score = _seniority_score(job, parsed_json)
+
+    return _clamp_0_100((years_score * 0.45) + (relevance_score * 0.40) + (seniority_score * 0.15))
+
+
+def _domain_score(job: Job, parsed_json: dict[str, Any], resume_text: str) -> float:
+    job_domains = [str(tag).lower() for tag in (job.domain_tags or []) if tag]
+    if not job_domains:
+        return 100.0
+
+    candidate_domain = str(parsed_json.get("primary_domain") or "").lower().strip()
+    if candidate_domain and any(tag in candidate_domain or candidate_domain in tag for tag in job_domains):
+        return 100.0
+
     text = resume_text.lower()
-    matches = sum(1 for tag in domain_tags if tag.lower() in text)
-    return round((matches / len(domain_tags)) * 100.0, 2)
+    matches = sum(1 for tag in job_domains if tag in text)
+    return _clamp_0_100((matches / len(job_domains)) * 100.0)
 
 
-def _confidence_score(resume: Resume, resume_text: str, skills: list[str]) -> float:
-    score = 40.0
+def _confidence_score(
+    parsed_json: dict[str, Any],
+    resume_text: str,
+    candidate_features: dict[str, Any],
+    *,
+    semantic: float,
+    skill: float,
+    experience: float,
+    domain: float,
+) -> float:
+    score = 20.0
     if resume_text.strip():
-        score += 25.0
-    if skills:
-        score += 20.0
-    if resume.experience_years is not None:
-        score += 15.0
-    return round(min(100.0, score), 2)
+        score += 10.0
+    if candidate_features.get("skills"):
+        score += 10.0
+    if candidate_features.get("titles"):
+        score += 10.0
+    if parsed_json.get("experience_entries"):
+        score += 10.0
+    if parsed_json.get("education"):
+        score += 8.0
+    if parsed_json.get("current_last_job"):
+        score += 4.0
+    if parsed_json.get("primary_domain"):
+        score += 4.0
+
+    signals = [semantic, skill, experience, domain]
+    spread = max(signals) - min(signals)
+    if spread <= 15:
+        score += 18.0
+    elif spread <= 30:
+        score += 10.0
+    elif spread <= 45:
+        score += 5.0
+    else:
+        score -= 8.0
+
+    if skill < 35 and experience < 35:
+        score -= 8.0
+    if semantic < 30 and domain < 30:
+        score -= 6.0
+
+    return _clamp_0_100(score)
 
 
 def _explainability_audit_flags(
@@ -223,24 +693,40 @@ def _build_audit_detail(
 
 
 def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputation:
-    resume_text = resume.raw_text or ""
-    resume_skills = [str(skill) for skill in (resume.skills_json or [])]
-    skill, matched_skills, missing_skills = _skill_score(job, resume_skills)
-    experience = _experience_score(
-        float(job.min_experience_years) if job.min_experience_years is not None else None,
-        float(resume.experience_years) if resume.experience_years is not None else None,
+    parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
+    candidate = _extract_candidate_features(resume)
+
+    skill, matched_skills, missing_skills = _skill_score(job, candidate["skills"])
+    experience = _experience_score(job, resume, parsed_json)
+    domain = _domain_score(job, parsed_json, candidate["raw_text"])
+
+    final = _clamp_0_100(
+        (semantic * 0.15) +
+        (skill * 0.35) +
+        (experience * 0.30) +
+        (domain * 0.20)
     )
-    domain = _domain_score(job.domain_tags or [], resume_text)
-    final = weighted_score(semantic=semantic, skill=skill, experience=experience, domain=domain)
-    confidence = _confidence_score(resume, resume_text, resume_skills)
+
+    confidence = _confidence_score(
+        parsed_json,
+        candidate["raw_text"],
+        candidate,
+        semantic=semantic,
+        skill=skill,
+        experience=experience,
+        domain=domain,
+    )
 
     reasons: list[str] = []
     if matched_skills:
-        reasons.append(f"Matched skills: {', '.join(matched_skills[:3])}")
+        reasons.append(f"Matched skills: {', '.join(matched_skills[:4])}")
     if resume.experience_years is not None:
-        reasons.append(f"{float(resume.experience_years):.1f}+ years experience detected")
-    if domain >= 50:
+        reasons.append(f"{float(resume.experience_years):.1f}+ years relevant experience")
+    if parsed_json.get("primary_domain"):
+        reasons.append(f"Primary domain: {parsed_json.get('primary_domain')}")
+    elif domain >= 50:
         reasons.append("Relevant domain overlap found")
+
     if not reasons:
         reasons = ["Resume parsed with limited matching signals"]
 
@@ -346,7 +832,6 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         row.resume_id: row for row in existing_rankings if row.resume_id is not None
     }
 
-    # Clean stale rankings for resumes no longer in parsed set.
     if resume_ids:
         db.execute(
             delete(Ranking).where(
@@ -363,12 +848,18 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             )
         )
 
-    pending_rows: list[tuple[Resume, RankingComputation, dict]] = []
+    pending_rows: list[tuple[Resume, RankingComputation, dict[str, Any]]] = []
     job_embedding_vector: list[float] | None = None
+    job_semantic_vector: list[float] | None = None
     try:
         job_embedding_vector = get_or_create_job_embedding(db, job).embedding
     except Exception:
         job_embedding_vector = None
+    if ENABLE_SECTION_SEMANTIC:
+        try:
+            job_semantic_vector = embed_text(_build_job_semantic_text(job))
+        except Exception:
+            job_semantic_vector = None
 
     for resume in resumes:
         resume_sig = _resume_signature(resume)
@@ -376,20 +867,55 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         if _ranking_is_fresh(existing, expected_job_sig=job_sig, expected_resume_sig=resume_sig):
             continue
 
+        candidate_features = _extract_candidate_features(resume)
         semantic_source = "token_overlap_fallback"
         semantic = _semantic_score_fallback(job.description or "", resume.raw_text or "")
+        semantic_components: dict[str, float] = {"full_text": semantic}
         if job_embedding_vector:
             try:
                 resume_embedding = get_or_create_resume_embedding(db, resume)
-                embedding_score = cosine_similarity_percent(job_embedding_vector, resume_embedding.embedding)
-                semantic = embedding_score
+                semantic = cosine_similarity_percent(job_embedding_vector, resume_embedding.embedding)
                 semantic_source = "embedding_cosine"
+                semantic_components = {"full_text": _clamp_0_100(semantic)}
+
+                if ENABLE_SECTION_SEMANTIC:
+                    resume_sections = _build_resume_semantic_sections(
+                        candidate_features,
+                        resume.raw_text or "",
+                    )
+                    weighted_semantic, components = _weighted_section_semantic(
+                        job_semantic_vector or job_embedding_vector,
+                        resume_sections,
+                        semantic,
+                    )
+                    semantic = weighted_semantic
+                    semantic_components = components
+                    semantic_source = "embedding_weighted_sections"
             except Exception:
                 semantic = _semantic_score_fallback(job.description or "", resume.raw_text or "")
                 semantic_source = "token_overlap_fallback"
+                semantic_components = {"full_text": semantic}
 
         result = compute_ranking(job, resume, semantic)
-        explanation_json: dict = {
+        parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
+        evidence_snippets = []
+
+        if parsed_json.get("current_last_job"):
+            evidence_snippets.append(
+                {"label": "Current title", "text": str(parsed_json.get("current_last_job"))[:320]}
+            )
+        if parsed_json.get("primary_domain"):
+            evidence_snippets.append(
+                {"label": "Primary domain", "text": str(parsed_json.get("primary_domain"))[:320]}
+            )
+        if parsed_json.get("skills"):
+            evidence_snippets.append(
+                {"label": "Top skills", "text": ", ".join(str(s) for s in parsed_json.get("skills", [])[:8])[:320]}
+            )
+        if not evidence_snippets:
+            evidence_snippets = [{"label": "Resume excerpt", "text": (resume.raw_text or "")[:320]}]
+
+        explanation_json: dict[str, Any] = {
             "score_breakdown": {
                 "semantic": result.semantic,
                 "skill": result.skill,
@@ -397,16 +923,12 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "domain": result.domain,
             },
             "semantic_source": semantic_source,
+            "semantic_components": semantic_components,
             "base_score": result.final,
             "base_confidence": result.confidence,
             "matched_skills": result.matched_skills,
             "missing_skills": result.missing_skills,
-            "evidence_snippets": [
-                {
-                    "label": "Resume excerpt",
-                    "text": (resume.raw_text or "")[:320],
-                }
-            ],
+            "evidence_snippets": evidence_snippets,
             "summary": " | ".join(result.reasons),
             "top_reasons": result.reasons,
             "model_version": MODEL_VERSION,
@@ -422,7 +944,6 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         }
         pending_rows.append((resume, result, explanation_json))
 
-    # Apply LLM reasoning + scoring for all candidates (or capped by env).
     ranked_candidates = sorted(pending_rows, key=lambda item: item[1].final, reverse=True)
     for resume, result, explanation_json in ranked_candidates[: max(0, LLM_TOP_K)]:
         llm_output = generate_candidate_reasoning(
@@ -435,6 +956,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         )
         if not llm_output:
             continue
+
         score_breakdown = llm_output.get("score_breakdown")
         if isinstance(score_breakdown, dict):
             semantic = _to_float(score_breakdown.get("semantic"))
@@ -458,8 +980,21 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
 
         matched = llm_output.get("matched_skills")
         if isinstance(matched, list):
-            explanation_json["matched_skills"] = [str(item) for item in matched][:8]
-            result.matched_skills = [str(item) for item in matched][:8]
+            merged_matched: list[str] = []
+            seen_matched: set[str] = set()
+            for item in [*result.matched_skills, *[str(v) for v in matched]]:
+                value = str(item).strip()
+                if not value:
+                    continue
+                key = value.lower()
+                if key in seen_matched:
+                    continue
+                seen_matched.add(key)
+                merged_matched.append(value)
+
+            result.matched_skills = merged_matched[:8]
+            explanation_json["matched_skills"] = result.matched_skills
+
         summary = llm_output.get("summary")
         strengths = llm_output.get("strengths")
         missing = llm_output.get("missing_skills")
@@ -473,7 +1008,21 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
         if isinstance(strengths, list):
             explanation_json["strengths"] = [str(item) for item in strengths][:5]
         if isinstance(missing, list):
-            explanation_json["missing_skills"] = [str(item) for item in missing][:8]
+            merged_missing: list[str] = []
+            seen_missing: set[str] = set()
+            matched_keys = {str(item).strip().lower() for item in result.matched_skills}
+            for item in [*result.missing_skills, *[str(v) for v in missing]]:
+                value = str(item).strip()
+                if not value:
+                    continue
+                key = value.lower()
+                if key in matched_keys or key in seen_missing:
+                    continue
+                seen_missing.add(key)
+                merged_missing.append(value)
+
+            result.missing_skills = merged_missing[:8]
+            explanation_json["missing_skills"] = result.missing_skills
         if isinstance(confidence_reasoning, str):
             explanation_json["confidence_reasoning"] = confidence_reasoning.strip()
         if isinstance(top_reasons, list):
@@ -645,10 +1194,9 @@ def get_rankings_for_job(
         missing_skills = payload.get("missing_skills", [])
         if not isinstance(missing_skills, list):
             missing_skills = []
-        resume_skills = [
-            str(item).lower()
-            for item in (resume.skills_json if isinstance(resume.skills_json, list) else [])
-        ]
+        resume_skills = _normalize_skill_names(
+            [str(item) for item in (resume.skills_json if isinstance(resume.skills_json, list) else [])]
+        )
         candidate_action = action_by_candidate.get(str(ranking.candidate_id))
         experience_years = float(resume.experience_years) if resume.experience_years is not None else None
         score = float(ranking.score)
@@ -734,13 +1282,12 @@ def get_rankings_for_job(
                 "stage": "Review",
                 "step": "Review",
                 "current_last_job": parsed_json.get("current_last_job"),
+                "primary_domain": parsed_json.get("primary_domain"),
                 "score": score,
                 "confidence": float(ranking.confidence),
                 "experience_years": experience_years,
                 "highest_degree": degree if isinstance(degree, str) else None,
-                "distance_miles": float(resume_distance)
-                if isinstance(resume_distance, (float, int))
-                else None,
+                "distance_miles": float(resume_distance) if isinstance(resume_distance, (float, int)) else None,
                 "sponsorship_required": sponsorship if isinstance(sponsorship, bool) else None,
                 "top_reasons": reasons[:3] if isinstance(reasons, list) else [],
                 "action_status": candidate_action,

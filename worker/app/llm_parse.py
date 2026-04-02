@@ -386,6 +386,12 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     if not result["volunteering"] and _has_volunteering_section(raw_text):
         result["volunteering"] = _extract_volunteering_from_text(raw_text)
 
+    result["phone"] = _normalize_phone_value(result.get("phone"), raw_text)
+    result["skills"] = _postprocess_skills(
+        result.get("skills", []),
+        result.get("certifications", []),
+    )
+
     if result["professional_summary"] is None:
         result["professional_summary"] = _extract_professional_summary_from_text(raw_text)
 
@@ -652,8 +658,11 @@ def _extract_volunteering_from_text(text: str) -> list[str]:
     # role line, org line, optional date line, plus short highlight list.
     entries: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
-    section_stop_pattern = re.compile(
-        r"(?i)\b(languages?|skills?|education|experience|projects?|certifications?|publications?)\b"
+    section_header_pattern = re.compile(
+        r"(?i)^\s*(languages?|skills?|education|experience|projects?|certifications?|publications?)\s*:?\s*$"
+    )
+    section_inline_upper_pattern = re.compile(
+        r"(?<!\w)(LANGUAGES?|SKILLS?|EDUCATION|EXPERIENCE|PROJECTS?|CERTIFICATIONS?|PUBLICATIONS?)\s*:?"
     )
     role_hint_pattern = re.compile(
         r"(?i)\b(volunteer|mentor|coach|coordinator|specialist|lead|assistant|member|teacher|facilitator)\b"
@@ -677,7 +686,10 @@ def _extract_volunteering_from_text(text: str) -> list[str]:
 
         # Stop once another section header appears (supports two-column OCR where
         # section names may be appended at end of a volunteering line).
-        stop_match = section_stop_pattern.search(raw_line)
+        if section_header_pattern.fullmatch(raw_line):
+            break
+
+        stop_match = section_inline_upper_pattern.search(raw_line)
         if stop_match:
             prefix = raw_line[: stop_match.start()].strip(" |,-")
             if prefix:
@@ -1049,6 +1061,82 @@ def _clean_string(value: Any) -> str | None:
     return value or None
 
 
+def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
+    if not isinstance(skills, list):
+        return []
+
+    normalized_candidates: list[str] = []
+    for value in skills:
+        if not isinstance(value, str):
+            continue
+        normalized_candidates.extend(_split_skill_candidate(value))
+
+    cert_names: list[str] = []
+    if isinstance(certifications, list):
+        for cert in certifications:
+            if isinstance(cert, dict):
+                name = _clean_string(cert.get("name"))
+                if name:
+                    cert_names.append(name.lower())
+
+    filtered: list[str] = []
+    for token in _unique_clean_strings(normalized_candidates):
+        lowered = token.lower()
+        if re.search(r"\b(certification|certified|certificate|credential)\b", lowered):
+            continue
+        if re.search(r"\b(fundamentals|associate|professional|mcp)\b", lowered):
+            continue
+        if cert_names and any(lowered == name or lowered in name or name in lowered for name in cert_names):
+            continue
+        filtered.append(token)
+
+    return _unique_clean_strings(filtered)
+
+
+def _split_skill_candidate(value: str) -> list[str]:
+    cleaned = _clean_string(value)
+    if not cleaned:
+        return []
+
+    # First split by explicit separators.
+    parts = [
+        _clean_string(part)
+        for part in re.split(r"\s*[|,;/]\s*|\s+\band\b\s+", cleaned, flags=re.IGNORECASE)
+    ]
+    parts = [part for part in parts if part]
+    if len(parts) > 1:
+        return parts
+
+    token = parts[0] if parts else cleaned
+
+    # Recover merged LLM tokens (e.g., "JavaScript PowerShell Power Automate").
+    known_patterns: list[tuple[str, str]] = [
+        (r"\bpower\s+automate\b", "Power Automate"),
+        (r"\bpowershell\b", "PowerShell"),
+        (r"\bjavascript\b", "JavaScript"),
+        (r"\btypescript\b", "TypeScript"),
+        (r"\bsharepoint\s+designer\b", "SharePoint Designer"),
+        (r"\bsharepoint\b", "SharePoint"),
+        (r"\bhtml\b", "HTML"),
+        (r"\bcss\b", "CSS"),
+        (r"\bpython\b", "Python"),
+        (r"\bsql\b", "SQL"),
+        (r"\bpower\s+apps\b", "Power Apps"),
+        (r"\bpower\s+bi\b", "Power BI"),
+    ]
+
+    matches: list[str] = []
+    token_lower = token.lower()
+    for pattern, label in known_patterns:
+        if re.search(pattern, token_lower):
+            matches.append(label)
+
+    if len(matches) >= 2:
+        return _unique_clean_strings(matches)
+
+    return [token]
+
+
 def _unique_clean_strings(values: list[Any]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -1063,6 +1151,51 @@ def _unique_clean_strings(values: list[Any]) -> list[str]:
             result.append(cleaned)
 
     return result
+
+
+def _normalize_phone_value(phone: Any, raw_text: str) -> str | None:
+    parsed = _clean_string(phone)
+    raw_phone = _extract_phone_from_text(raw_text)
+
+    candidate = parsed or raw_phone
+    if not candidate:
+        return None
+
+    parsed_digits = re.sub(r"\D", "", parsed) if parsed else ""
+    raw_digits = re.sub(r"\D", "", raw_phone) if raw_phone else ""
+    if (
+        parsed
+        and raw_phone
+        and "+" not in parsed
+        and "+" in raw_phone
+        and parsed_digits
+        and raw_digits.endswith(parsed_digits[-10:])
+    ):
+        candidate = raw_phone
+
+    has_plus = candidate.strip().startswith("+")
+    digits = re.sub(r"\D", "", candidate)
+    if not digits:
+        return None
+
+    if has_plus:
+        if len(digits) == 11 and digits.startswith("1"):
+            return f"+1-{digits[1:4]}-{digits[4:7]}-{digits[7:]}"
+        return f"+{digits}"
+
+    if len(digits) == 10:
+        return f"{digits[0:3]}-{digits[3:6]}-{digits[6:]}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+1-{digits[1:4]}-{digits[4:7]}-{digits[7:]}"
+
+    return candidate
+
+
+def _extract_phone_from_text(text: str) -> str | None:
+    match = re.search(r"(\+?\d[\d()\-\s]{8,}\d)", text)
+    if not match:
+        return None
+    return _clean_string(match.group(1))
 
 
 def _clean_date_string(value: Any) -> str | None:

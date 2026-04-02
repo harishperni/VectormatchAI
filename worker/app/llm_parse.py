@@ -385,6 +385,12 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
 
     if not result["volunteering"] and _has_volunteering_section(raw_text):
         result["volunteering"] = _extract_volunteering_from_text(raw_text)
+    result["volunteering_entries"] = _normalize_volunteering_entries(
+        result.get("volunteering", []),
+        raw_text,
+    )
+    if result["volunteering_entries"]:
+        result["volunteering"] = _stringify_volunteering_entries(result["volunteering_entries"])
 
     result["phone"] = _normalize_phone_value(result.get("phone"), raw_text)
     result["skills"] = _postprocess_skills(
@@ -734,6 +740,11 @@ def _extract_volunteering_from_text(text: str) -> list[str]:
         if has_date:
             if current is None:
                 current = {"role": None, "org": None, "date": None, "highlights": []}
+            date_free = _clean_string(_strip_date_range_from_text(line))
+            if date_free and not current.get("org") and _looks_like_org_line(date_free):
+                current["org"] = date_free
+            elif date_free and not current.get("role") and _looks_like_volunteer_role_line(date_free):
+                current["role"] = date_free
             date_label = " - ".join(
                 [
                     value
@@ -758,7 +769,13 @@ def _extract_volunteering_from_text(text: str) -> list[str]:
             continue
 
         if not current.get("org"):
-            current["org"] = line
+            if _looks_like_org_line(line):
+                current["org"] = line
+            else:
+                highlights = current.get("highlights", [])
+                if isinstance(highlights, list) and len(highlights) < 4:
+                    highlights.append(line)
+                    current["highlights"] = highlights
             continue
 
         # If role/org/date already present, treat subsequent text as highlights before opening a new entry.
@@ -785,6 +802,325 @@ def _extract_volunteering_from_text(text: str) -> list[str]:
         parts = [part for part in [role, org, date_label] if part]
         if highlights:
             parts.append("; ".join(highlights[:3]))
+        merged = _clean_string(" | ".join(parts))
+        if merged:
+            output.append(merged)
+
+    return _unique_clean_strings(output)
+
+
+def _looks_like_org_line(value: str) -> bool:
+    line = _clean_string(value)
+    if not line:
+        return False
+
+    lowered = line.lower()
+    if len(line.split()) < 2:
+        return False
+    if line.endswith("."):
+        return False
+    if re.search(r"\d", line):
+        return False
+
+    verb_signals = {
+        "developed",
+        "implemented",
+        "conducted",
+        "improved",
+        "created",
+        "managed",
+        "built",
+        "enhanced",
+        "supported",
+        "trained",
+        "coordinated",
+        "led",
+        "helped",
+        "assisted",
+    }
+    if any(f" {verb} " in f" {lowered} " for verb in verb_signals):
+        return False
+
+    org_signals = {
+        "foundation",
+        "fund",
+        "society",
+        "association",
+        "organization",
+        "committee",
+        "nonprofit",
+        "charity",
+        "community",
+        "school",
+        "college",
+        "university",
+        "club",
+        "center",
+    }
+    if any(signal in lowered for signal in org_signals):
+        return True
+
+    words = [w for w in re.split(r"\s+", line) if w]
+    title_like = sum(1 for w in words if re.match(r"^[A-Z][a-zA-Z&'.-]*$", w))
+    return title_like >= max(2, len(words) - 1)
+
+
+def _looks_like_volunteer_role_line(value: str) -> bool:
+    line = _clean_string(value)
+    if not line:
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b(volunteer|mentor|coach|coordinator|specialist|lead|assistant|member|teacher|facilitator)\b",
+            line,
+        )
+    )
+
+
+def _strip_date_range_from_text(value: str) -> str:
+    cleaned = value
+    patterns = [
+        DATE_RANGE_MONTH_APOS_PATTERN,
+        DATE_RANGE_ISO_PATTERN,
+        DATE_RANGE_MONTH_PATTERN,
+        DATE_RANGE_NUMERIC_PATTERN,
+        DATE_RANGE_YEAR_PATTERN,
+    ]
+    for pattern in patterns:
+        cleaned = pattern.sub(" ", cleaned)
+    cleaned = re.sub(r"\s*(?:-|–|—|to)\s*(?:present|current|currently|now|today|ongoing)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" |,-")
+    return cleaned
+
+
+def _extract_location_fragment(value: str) -> str | None:
+    line = _clean_string(value)
+    if not line:
+        return None
+    match = re.search(
+        r"\b([A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)(?:,\s*(?:USA|US|United States))?)\b",
+        line,
+    )
+    if not match:
+        return None
+    candidate = _clean_string(match.group(1))
+    if not candidate:
+        return None
+    return candidate if _looks_like_location_text(candidate) else None
+
+
+def _looks_like_location_text(value: str) -> bool:
+    text = _clean_string(value)
+    if not text:
+        return False
+    if "," not in text:
+        return False
+
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) < 2:
+        return False
+
+    city = parts[0]
+    region = parts[1]
+
+    # City token should be short and title-like.
+    city_words = [w for w in city.split() if w]
+    if not city_words or len(city_words) > 5:
+        return False
+    if any(re.search(r"\d", w) for w in city_words):
+        return False
+
+    # Reject obvious sentence fragments accidentally captured as locations.
+    lower_text = text.lower()
+    sentence_signals = {
+        "developed",
+        "implemented",
+        "conducted",
+        "improving",
+        "improved",
+        "reaching",
+        "focused",
+        "impacting",
+        "collaborated",
+        "designed",
+        "managed",
+        "provided",
+        "assisted",
+    }
+    if any(f" {signal} " in f" {lower_text} " for signal in sentence_signals):
+        return False
+
+    # Region should be a US state abbreviation, common US state name, or country marker.
+    us_states = {
+        "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
+        "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa",
+        "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+        "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire",
+        "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio",
+        "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota",
+        "tennessee", "texas", "utah", "vermont", "virginia", "washington", "west virginia",
+        "wisconsin", "wyoming",
+    }
+    region_clean = region.strip()
+    if re.fullmatch(r"[A-Z]{2}", region_clean):
+        return True
+    if region_clean.lower() in us_states:
+        return True
+    if region_clean.lower() in {"usa", "us", "united states"}:
+        return True
+
+    return False
+
+
+def _extract_volunteering_org_and_locations(raw_text: str) -> tuple[list[str], list[str]]:
+    block = _extract_section_block(
+        raw_text,
+        r"^\s*(volunteering|volunteer(?:\s+experience)?|community\s+involvement)\s*:?\s*$",
+        max_lines=50,
+    )
+    if not block:
+        return [], []
+
+    section_header_pattern = re.compile(
+        r"(?i)^\s*(languages?|skills?|education|experience|projects?|certifications?|publications?)\s*:?\s*$"
+    )
+    organizations: list[str] = []
+    locations: list[str] = []
+
+    for raw in block:
+        line = _clean_string(re.sub(r"^[•*\-\s]+", "", raw))
+        if not line:
+            continue
+        if section_header_pattern.fullmatch(line):
+            break
+
+        loc = _extract_location_fragment(line)
+        if loc:
+            locations.append(loc)
+            continue
+
+        if _looks_like_volunteer_role_line(line):
+            continue
+        if _extract_date_range_from_text(line) != (None, None, False):
+            continue
+        if _looks_like_org_line(line):
+            organizations.append(line)
+
+    return _unique_clean_strings(organizations), _unique_clean_strings(locations)
+
+
+def _parse_volunteering_line(value: str) -> dict[str, Any]:
+    parts = [
+        part
+        for part in (_clean_string(item) for item in re.split(r"\|", value))
+        if part
+    ]
+
+    role: str | None = None
+    organization: str | None = None
+    location: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    is_current = False
+    highlights: list[str] = []
+
+    for part in parts:
+        start, end, current = _extract_date_range_from_text(part)
+        if start or end or current:
+            start_date = start_date or start
+            end_date = end_date or end
+            is_current = is_current or current
+            continue
+
+        loc = _extract_location_fragment(part)
+        if loc and not location:
+            location = loc
+            continue
+
+        if not role and _looks_like_volunteer_role_line(part):
+            role = part
+            continue
+        if not organization and _looks_like_org_line(part):
+            organization = part
+            continue
+
+        highlights.append(part)
+
+    if not role and parts:
+        role = parts[0]
+
+    if not organization:
+        for item in list(highlights):
+            if _looks_like_org_line(item) and not _looks_like_volunteer_role_line(item):
+                organization = item
+                highlights.remove(item)
+                break
+
+    return {
+        "role": role,
+        "organization": organization,
+        "location": location,
+        "start_date": start_date,
+        "end_date": end_date,
+        "is_current": bool(is_current),
+        "highlights": _unique_clean_strings(highlights)[:4],
+    }
+
+
+def _normalize_volunteering_entries(volunteering: Any, raw_text: str) -> list[dict[str, Any]]:
+    if not isinstance(volunteering, list):
+        return []
+
+    fallback_orgs, fallback_locations = _extract_volunteering_org_and_locations(raw_text)
+    output: list[dict[str, Any]] = []
+
+    for idx, value in enumerate(volunteering):
+        if not isinstance(value, str):
+            continue
+        entry = _parse_volunteering_line(value)
+
+        if not entry.get("organization") and idx < len(fallback_orgs):
+            entry["organization"] = fallback_orgs[idx]
+        if not entry.get("location") and idx < len(fallback_locations):
+            entry["location"] = fallback_locations[idx]
+
+        if not any(
+            entry.get(key)
+            for key in ["role", "organization", "location", "start_date", "end_date"]
+        ) and not entry.get("highlights"):
+            continue
+        output.append(entry)
+
+    return output
+
+
+def _stringify_volunteering_entries(entries: Any) -> list[str]:
+    if not isinstance(entries, list):
+        return []
+
+    output: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        role = _clean_string(entry.get("role"))
+        organization = _clean_string(entry.get("organization"))
+        location = _clean_string(entry.get("location"))
+        start_date = _clean_string(entry.get("start_date"))
+        end_date = _clean_string(entry.get("end_date"))
+        is_current = bool(entry.get("is_current"))
+        highlights = entry.get("highlights") if isinstance(entry.get("highlights"), list) else []
+        highlights_clean = [_clean_string(item) for item in highlights if _clean_string(item)]
+
+        date_label = " - ".join(
+            [
+                part
+                for part in [start_date, end_date or ("Present" if is_current else None)]
+                if part
+            ]
+        )
+        parts = [part for part in [role, organization, location, date_label] if part]
+        if highlights_clean:
+            parts.append("; ".join(highlights_clean[:3]))
         merged = _clean_string(" | ".join(parts))
         if merged:
             output.append(merged)

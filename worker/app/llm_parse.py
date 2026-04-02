@@ -383,6 +383,9 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     if not result["certifications"] and _has_certification_section(raw_text):
         result["certifications"] = _extract_certifications_from_text(raw_text)
 
+    if not result["volunteering"] and _has_volunteering_section(raw_text):
+        result["volunteering"] = _extract_volunteering_from_text(raw_text)
+
     if result["professional_summary"] is None:
         result["professional_summary"] = _extract_professional_summary_from_text(raw_text)
 
@@ -493,6 +496,15 @@ def _has_certification_section(text: str) -> bool:
     return bool(
         re.search(
             r"(?im)\b(certifications?|education\s*/\s*certi\w*\s*/\s*training)\b",
+            text,
+        )
+    )
+
+
+def _has_volunteering_section(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?im)^\s*(volunteering|volunteer(?:\s+experience)?|community\s+involvement)\s*:?\s*$",
             text,
         )
     )
@@ -625,6 +637,147 @@ def _extract_professional_summary_from_text(text: str) -> str | None:
             if merged:
                 return merged
     return None
+
+
+def _extract_volunteering_from_text(text: str) -> list[str]:
+    block = _extract_section_block(
+        text,
+        r"^\s*(volunteering|volunteer(?:\s+experience)?|community\s+involvement)\s*:?\s*$",
+        max_lines=50,
+    )
+    if not block:
+        return []
+
+    # Build compact entries from common patterns:
+    # role line, org line, optional date line, plus short highlight list.
+    entries: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    section_stop_pattern = re.compile(
+        r"(?i)\b(languages?|skills?|education|experience|projects?|certifications?|publications?)\b"
+    )
+    role_hint_pattern = re.compile(
+        r"(?i)\b(volunteer|mentor|coach|coordinator|specialist|lead|assistant|member|teacher|facilitator)\b"
+    )
+
+    def flush_current() -> None:
+        nonlocal current
+        if not current:
+            return
+        if not _clean_string(current.get("role")) and not _clean_string(current.get("org")):
+            current = None
+            return
+        entries.append(current)
+        current = None
+
+    cleaned_block: list[tuple[str, bool]] = []
+    for raw in block:
+        raw_line = re.sub(r"\s+", " ", raw).strip()
+        if not raw_line:
+            continue
+
+        # Stop once another section header appears (supports two-column OCR where
+        # section names may be appended at end of a volunteering line).
+        stop_match = section_stop_pattern.search(raw_line)
+        if stop_match:
+            prefix = raw_line[: stop_match.start()].strip(" |,-")
+            if prefix:
+                cleaned_block.append((prefix, bool(re.match(r"^[•*\-]", raw.strip()))))
+            break
+
+        cleaned_block.append((raw_line, bool(re.match(r"^[•*\-]", raw.strip()))))
+
+    # Merge wrapped lines so "Implemented ... to" + "enhance ..." becomes one highlight.
+    merged_block: list[tuple[str, bool]] = []
+    for raw_line, is_bullet in cleaned_block:
+        line = _clean_string(re.sub(r"^[•*\-\s]+", "", raw_line))
+        if not line:
+            continue
+
+        if (
+            merged_block
+            and not is_bullet
+            and not merged_block[-1][0].endswith((".", "!", "?", ":"))
+            and not re.match(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}$", line)
+            and not role_hint_pattern.search(line)
+        ):
+            prev_text, prev_bullet = merged_block[-1]
+            merged_block[-1] = (f"{prev_text} {line}".strip(), prev_bullet)
+            continue
+        merged_block.append((line, is_bullet))
+
+    for line, is_bullet in merged_block:
+        start_date, end_date, is_current = _extract_date_range_from_text(line)
+        has_date = bool(start_date or end_date or is_current)
+
+        # A likely new volunteering role starts a new record when current one is already populated.
+        if (
+            not is_bullet
+            and role_hint_pattern.search(line)
+            and current
+            and (_clean_string(current.get("role")) or _clean_string(current.get("org")))
+            and current.get("date")
+        ):
+            flush_current()
+
+        if has_date:
+            if current is None:
+                current = {"role": None, "org": None, "date": None, "highlights": []}
+            date_label = " - ".join(
+                [
+                    value
+                    for value in [start_date, end_date or ("Present" if is_current else None)]
+                    if value
+                ]
+            )
+            current["date"] = _clean_string(date_label) or _clean_string(line)
+            continue
+
+        if is_bullet:
+            if current is None:
+                current = {"role": None, "org": None, "date": None, "highlights": []}
+            highlights = current.get("highlights", [])
+            if isinstance(highlights, list) and len(highlights) < 4:
+                highlights.append(line)
+                current["highlights"] = highlights
+            continue
+
+        if current is None:
+            current = {"role": line, "org": None, "date": None, "highlights": []}
+            continue
+
+        if not current.get("org"):
+            current["org"] = line
+            continue
+
+        # If role/org/date already present, treat subsequent text as highlights before opening a new entry.
+        if current.get("date"):
+            highlights = current.get("highlights", [])
+            if isinstance(highlights, list) and len(highlights) < 4:
+                highlights.append(line)
+                current["highlights"] = highlights
+            continue
+
+        flush_current()
+        current = {"role": line, "org": None, "date": None, "highlights": []}
+
+    flush_current()
+
+    output: list[str] = []
+    for item in entries:
+        role = _clean_string(item.get("role"))
+        org = _clean_string(item.get("org"))
+        date_label = _clean_string(item.get("date"))
+        highlights = item.get("highlights") if isinstance(item.get("highlights"), list) else []
+        highlights = [_clean_string(h) for h in highlights if _clean_string(h)]
+
+        parts = [part for part in [role, org, date_label] if part]
+        if highlights:
+            parts.append("; ".join(highlights[:3]))
+        merged = _clean_string(" | ".join(parts))
+        if merged:
+            output.append(merged)
+
+    return _unique_clean_strings(output)
 
 
 def _count_date_ranges(text: str) -> int:

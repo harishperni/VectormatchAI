@@ -56,6 +56,7 @@ STRICT_EMPTY_OUTPUT = {
     "email": None,
     "phone": None,
     "candidate_location": None,
+    "willing_to_relocate": None,
     "linkedin_url": None,
     "github_url": None,
     "portfolio_url": None,

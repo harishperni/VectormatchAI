@@ -25,6 +25,7 @@ export type RankingRow = {
   highest_degree?: string | null;
   distance_miles?: number | null;
   sponsorship_required?: boolean | null;
+  willing_to_relocate?: boolean | null;
   top_reasons: string[];
   action_status?: string | null;
   audit_flags?: string[];

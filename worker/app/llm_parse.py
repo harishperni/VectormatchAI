@@ -41,6 +41,7 @@ Important rules:
 - highest_degree must align with the highest explicit degree found in education.
 - Extract only professional experience into experience_entries.
 - Keep achievements empty unless they are explicitly separated and clearly identifiable.
+- Extract willing_to_relocate only when it is explicitly stated in the resume text.
 """
 
 ATS_RESUME_OUTPUT_SCHEMA_V2 = """{
@@ -48,6 +49,7 @@ ATS_RESUME_OUTPUT_SCHEMA_V2 = """{
   "email": null,
   "phone": null,
   "candidate_location": null,
+  "willing_to_relocate": null,
   "linkedin_url": null,
   "github_url": null,
   "portfolio_url": null,
@@ -298,6 +300,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         "email": clean(parsed.get("email")),
         "phone": clean(parsed.get("phone")),
         "candidate_location": clean(parsed.get("candidate_location")),
+        "willing_to_relocate": _to_optional_bool(parsed.get("willing_to_relocate")),
         "linkedin_url": clean(parsed.get("linkedin_url")),
         "github_url": clean(parsed.get("github_url")),
         "portfolio_url": clean(parsed.get("portfolio_url")),
@@ -413,6 +416,8 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
 
     if result["current_last_job"] is None:
         result["current_last_job"] = derive_current_last_job(result["experience_entries"])
+    if result["willing_to_relocate"] is None:
+        result["willing_to_relocate"] = _infer_willing_to_relocate_from_text(raw_text)
 
     return result
 
@@ -1395,6 +1400,44 @@ def _clean_string(value: Any) -> str | None:
         return None
     value = re.sub(r"\s+", " ", value).strip()
     return value or None
+
+
+def _to_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"yes", "true", "y"}:
+            return True
+        if lowered in {"no", "false", "n"}:
+            return False
+    return None
+
+
+def _infer_willing_to_relocate_from_text(text: str) -> bool | None:
+    raw = (text or "").lower()
+    if not raw:
+        return None
+
+    negative_patterns = [
+        r"\bnot willing to relocat(?:e|ion)\b",
+        r"\bunwilling to relocat(?:e|ion)\b",
+        r"\brelocat(?:ion|e)\s+(?:not available|not possible|cannot)\b",
+        r"\bno relocation\b",
+    ]
+    positive_patterns = [
+        r"\bwilling to relocat(?:e|ion)\b",
+        r"\bopen to relocat(?:e|ion)\b",
+        r"\bavailable for relocat(?:e|ion)\b",
+        r"\bready to relocat(?:e|ion)\b",
+        r"\brelocat(?:ion|e)\s+available\b",
+    ]
+
+    if any(re.search(pattern, raw, re.IGNORECASE) for pattern in negative_patterns):
+        return False
+    if any(re.search(pattern, raw, re.IGNORECASE) for pattern in positive_patterns):
+        return True
+    return None
 
 
 def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:

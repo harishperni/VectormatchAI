@@ -735,8 +735,8 @@ def _managerial_skill_score(job: Job, candidate_features: dict[str, Any], parsed
 
 def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resume) -> float:
     work_mode = str(getattr(job, "work_mode", "remote") or "remote").lower().strip()
-    if work_mode not in {"hybrid", "inperson"}:
-        return 0.0
+    willing_to_relocate = parsed_json.get("willing_to_relocate")
+    willing: bool | None = willing_to_relocate if isinstance(willing_to_relocate, bool) else None
 
     distance_value = parsed_json.get("distance_miles")
     distance_miles: float | None = float(distance_value) if isinstance(distance_value, (int, float)) else None
@@ -748,20 +748,44 @@ def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resu
         if computed is not None:
             distance_miles = float(computed)
 
+    if work_mode == "remote":
+        if distance_miles is not None and distance_miles > 200 and willing is False:
+            return -3.0
+        return 0.0
+
+    # For hybrid/in-person, prioritize either nearby candidates (<=50 miles)
+    # or candidates explicitly willing to relocate.
     if distance_miles is None:
-        return -6.0 if work_mode == "inperson" else -3.0
+        if willing is True:
+            return 7.0 if work_mode == "inperson" else 6.0
+        if willing is False:
+            return -8.0 if work_mode == "inperson" else -6.0
+        return -4.0 if work_mode == "inperson" else -3.0
 
     if distance_miles <= 10:
         return 12.0
     if distance_miles <= 25:
-        return 9.0
+        return 10.0
     if distance_miles <= 50:
-        return 6.0
+        return 8.0
+
+    if willing is True:
+        if distance_miles <= 150:
+            return 7.0 if work_mode == "inperson" else 6.0
+        return 5.0 if work_mode == "inperson" else 4.0
+
+    if willing is False:
+        if distance_miles <= 100:
+            return -6.0 if work_mode == "inperson" else -5.0
+        if distance_miles <= 200:
+            return -10.0 if work_mode == "inperson" else -8.0
+        return -15.0 if work_mode == "inperson" else -12.0
+
     if distance_miles <= 100:
-        return 2.0
+        return 1.0
     if distance_miles <= 200:
-        return -4.0
-    return -14.0 if work_mode == "inperson" else -10.0
+        return -3.0
+    return -8.0 if work_mode == "inperson" else -6.0
 
 
 def _confidence_score(
@@ -1453,6 +1477,7 @@ def get_rankings_for_job(
                 continue
 
         sponsorship = parsed_json.get("sponsorship_required")
+        willing_to_relocate = parsed_json.get("willing_to_relocate")
         if sponsorship_required is not None:
             if isinstance(sponsorship, bool):
                 if sponsorship != sponsorship_required:
@@ -1500,6 +1525,7 @@ def get_rankings_for_job(
                 "highest_degree": degree if isinstance(degree, str) else None,
                 "distance_miles": float(resume_distance) if isinstance(resume_distance, (float, int)) else None,
                 "sponsorship_required": sponsorship if isinstance(sponsorship, bool) else None,
+                "willing_to_relocate": willing_to_relocate if isinstance(willing_to_relocate, bool) else None,
                 "top_reasons": reasons[:3] if isinstance(reasons, list) else [],
                 "action_status": candidate_action,
                 "audit_flags": audit_flags,

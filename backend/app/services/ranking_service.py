@@ -25,7 +25,7 @@ from app.services.embedding_service import (
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 
-SCORING_VERSION = "score_v8_structured_v1_work_mode_distance"
+SCORING_VERSION = "score_v9_structured_v1_relocation_distance"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"

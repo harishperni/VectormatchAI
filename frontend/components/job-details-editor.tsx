@@ -26,6 +26,7 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
   const [title, setTitle] = useState(job.title);
   const [description, setDescription] = useState(job.description);
   const [location, setLocation] = useState(job.location ?? "");
+  const [workMode, setWorkMode] = useState<"remote" | "hybrid" | "inperson">(job.work_mode ?? "remote");
   const [minExperience, setMinExperience] = useState(
     job.min_experience_years == null ? "" : String(job.min_experience_years)
   );
@@ -53,6 +54,7 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
         title: title.trim(),
         description: description.trim(),
         location: location.trim() || null,
+        work_mode: workMode,
         min_experience_years: minExperience.trim() ? Number(minExperience) : null,
         required_skills: toList(requiredSkills),
         nice_to_have_skills: toList(niceToHaveSkills),
@@ -104,6 +106,9 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
             <span className="font-semibold text-slate-900">Location:</span> {job.location || "Not set"}
           </p>
           <p>
+            <span className="font-semibold text-slate-900">Work Mode:</span> {job.work_mode}
+          </p>
+          <p>
             <span className="font-semibold text-slate-900">Min Experience:</span>{" "}
             {job.min_experience_years == null ? "Not set" : `${job.min_experience_years} years`}
           </p>
@@ -142,6 +147,19 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
               className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
               placeholder="Chicago, IL"
             />
+          </label>
+
+          <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+            Work Mode
+            <select
+              value={workMode}
+              onChange={(event) => setWorkMode(event.target.value as "remote" | "hybrid" | "inperson")}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            >
+              <option value="remote">Remote</option>
+              <option value="hybrid">Hybrid</option>
+              <option value="inperson">In-person</option>
+            </select>
           </label>
 
           <label className="flex flex-col gap-1 text-sm font-medium text-slate-700 md:col-span-2">

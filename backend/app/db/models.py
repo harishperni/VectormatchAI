@@ -26,6 +26,7 @@ class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (
         CheckConstraint("status IN ('active','paused','closed')", name="ck_jobs_status"),
+        CheckConstraint("work_mode IN ('remote','hybrid','inperson')", name="ck_jobs_work_mode"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -35,6 +36,7 @@ class Job(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
+    work_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="remote")
     employment_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     min_experience_years: Mapped[float | None] = mapped_column(Numeric(4, 1), nullable=True)
     required_skills: Mapped[list[str]] = mapped_column(

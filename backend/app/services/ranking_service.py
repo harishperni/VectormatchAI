@@ -25,7 +25,7 @@ from app.services.embedding_service import (
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 
-SCORING_VERSION = "score_v6_structured_v3_resume_ranking"
+SCORING_VERSION = "score_v8_structured_v1_work_mode_distance"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"
@@ -77,6 +77,9 @@ class RankingComputation:
     skill: float
     experience: float
     domain: float
+    soft_skill: float
+    managerial_skill: float
+    distance_priority_bonus: float
     final: float
     confidence: float
     matched_skills: list[str]
@@ -130,6 +133,23 @@ def _resolve_candidate_location(
 
     if candidate.location and candidate.location.strip():
         return candidate.location.strip()
+
+    raw_text = resume.raw_text or ""
+    match = LOCATION_IN_TEXT_PATTERN.search(raw_text)
+    if match:
+        return match.group(1).strip()
+
+    fallback = CITY_STATE_PATTERN.search(raw_text)
+    if fallback:
+        return fallback.group(1).strip()
+
+    return None
+
+
+def _resolve_candidate_location_for_ranking(parsed_json: dict[str, Any], resume: Resume) -> str | None:
+    parsed_location = parsed_json.get("candidate_location")
+    if isinstance(parsed_location, str) and parsed_location.strip():
+        return parsed_location.strip()
 
     raw_text = resume.raw_text or ""
     match = LOCATION_IN_TEXT_PATTERN.search(raw_text)
@@ -585,6 +605,165 @@ def _domain_score(job: Job, parsed_json: dict[str, Any], resume_text: str) -> fl
     return _clamp_0_100((matches / len(job_domains)) * 100.0)
 
 
+SOFT_SKILL_KEYWORDS: dict[str, set[str]] = {
+    "communication": {"communication", "communicate", "presentation", "stakeholder", "interpersonal"},
+    "collaboration": {"collaboration", "collaborate", "cross functional", "teamwork", "partnered"},
+    "leadership": {"leadership", "led", "mentored", "coached", "ownership"},
+    "problem_solving": {"problem solving", "troubleshooting", "analytical", "critical thinking"},
+    "planning_execution": {"planning", "coordination", "organized", "prioritization", "execution"},
+}
+
+MANAGERIAL_KEYWORDS: set[str] = {
+    "manager",
+    "management",
+    "lead",
+    "team lead",
+    "people management",
+    "hiring",
+    "mentoring",
+    "coaching",
+    "stakeholder management",
+    "roadmap",
+    "delivery ownership",
+    "performance management",
+    "budget",
+    "resource planning",
+    "program management",
+    "project management",
+}
+
+
+def _build_job_requirement_text(job: Job) -> str:
+    return " ".join(
+        [
+            str(job.title or ""),
+            str(job.description or ""),
+            " ".join(str(skill) for skill in (job.required_skills or []) if skill),
+            " ".join(str(skill) for skill in (job.nice_to_have_skills or []) if skill),
+        ]
+    ).lower()
+
+
+def _build_candidate_signal_text(candidate_features: dict[str, Any]) -> str:
+    parsed_json = candidate_features.get("parsed_json", {})
+    experience_entries = parsed_json.get("experience_entries", []) if isinstance(parsed_json, dict) else []
+
+    chunks: list[str] = []
+    chunks.extend(str(title) for title in candidate_features.get("titles", [])[:8])
+    chunks.extend(str(desc) for desc in candidate_features.get("descriptions", [])[:8])
+    chunks.extend(str(skill) for skill in candidate_features.get("skills", [])[:30])
+    chunks.append(str(candidate_features.get("raw_text") or "")[:4000])
+    if isinstance(experience_entries, list):
+        for entry in experience_entries[:4]:
+            if not isinstance(entry, dict):
+                continue
+            chunks.append(str(entry.get("title") or ""))
+            chunks.append(str(entry.get("description") or ""))
+
+    return " ".join(chunks).lower()
+
+
+def _keyword_hit_count(text: str, keywords: set[str]) -> int:
+    lowered = text.lower()
+    return sum(1 for key in keywords if key in lowered)
+
+
+def _soft_skill_score(job: Job, candidate_features: dict[str, Any]) -> float:
+    job_text = _build_job_requirement_text(job)
+    candidate_text = _build_candidate_signal_text(candidate_features)
+
+    expected_groups = [
+        group for group, terms in SOFT_SKILL_KEYWORDS.items() if any(term in job_text for term in terms)
+    ]
+
+    if not expected_groups:
+        baseline_hits = sum(
+            1
+            for terms in SOFT_SKILL_KEYWORDS.values()
+            if _keyword_hit_count(candidate_text, terms) > 0
+        )
+        return _clamp_0_100(50.0 + (baseline_hits * 10.0))
+
+    matched_groups = sum(
+        1
+        for group in expected_groups
+        if _keyword_hit_count(candidate_text, SOFT_SKILL_KEYWORDS[group]) > 0
+    )
+    ratio = matched_groups / max(1, len(expected_groups))
+    score = (ratio * 100.0)
+
+    missing = len(expected_groups) - matched_groups
+    if missing > 0:
+        score -= min(20.0, missing * 8.0)
+    return _clamp_0_100(score)
+
+
+def _managerial_skill_score(job: Job, candidate_features: dict[str, Any], parsed_json: dict[str, Any]) -> float:
+    job_text = _build_job_requirement_text(job)
+    candidate_text = _build_candidate_signal_text(candidate_features)
+    desired_seniority = _infer_job_seniority(job)
+    candidate_seniority = str(parsed_json.get("seniority_level") or "").lower().strip()
+
+    expects_managerial = (
+        desired_seniority in {"lead/manager", "principal+"}
+        or any(keyword in job_text for keyword in MANAGERIAL_KEYWORDS)
+    )
+
+    managerial_hits = _keyword_hit_count(candidate_text, MANAGERIAL_KEYWORDS)
+    title_hits = sum(
+        1
+        for title in candidate_features.get("titles", [])[:6]
+        if any(tag in str(title).lower() for tag in {"lead", "manager", "head", "director"})
+    )
+
+    base = min(100.0, (managerial_hits * 10.0) + (title_hits * 20.0))
+    if not expects_managerial:
+        return _clamp_0_100(max(60.0, base))
+
+    seniority_bonus = 0.0
+    if candidate_seniority in {"lead/manager", "principal+"}:
+        seniority_bonus = 12.0
+    elif candidate_seniority == "senior":
+        seniority_bonus = 6.0
+
+    score = base + seniority_bonus
+    if managerial_hits == 0 and title_hits == 0:
+        score = max(20.0, score - 20.0)
+
+    return _clamp_0_100(score)
+
+
+def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resume) -> float:
+    work_mode = str(getattr(job, "work_mode", "remote") or "remote").lower().strip()
+    if work_mode not in {"hybrid", "inperson"}:
+        return 0.0
+
+    distance_value = parsed_json.get("distance_miles")
+    distance_miles: float | None = float(distance_value) if isinstance(distance_value, (int, float)) else None
+
+    if distance_miles is None:
+        job_location = _resolve_job_location(job)
+        candidate_location = _resolve_candidate_location_for_ranking(parsed_json, resume)
+        computed = distance_miles_between(job_location, candidate_location)
+        if computed is not None:
+            distance_miles = float(computed)
+
+    if distance_miles is None:
+        return -6.0 if work_mode == "inperson" else -3.0
+
+    if distance_miles <= 10:
+        return 12.0
+    if distance_miles <= 25:
+        return 9.0
+    if distance_miles <= 50:
+        return 6.0
+    if distance_miles <= 100:
+        return 2.0
+    if distance_miles <= 200:
+        return -4.0
+    return -14.0 if work_mode == "inperson" else -10.0
+
+
 def _confidence_score(
     parsed_json: dict[str, Any],
     resume_text: str,
@@ -594,6 +773,8 @@ def _confidence_score(
     skill: float,
     experience: float,
     domain: float,
+    soft_skill: float | None = None,
+    managerial_skill: float | None = None,
 ) -> float:
     score = 20.0
     if resume_text.strip():
@@ -612,6 +793,10 @@ def _confidence_score(
         score += 4.0
 
     signals = [semantic, skill, experience, domain]
+    if soft_skill is not None:
+        signals.append(soft_skill)
+    if managerial_skill is not None:
+        signals.append(managerial_skill)
     spread = max(signals) - min(signals)
     if spread <= 15:
         score += 18.0
@@ -699,13 +884,19 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
     skill, matched_skills, missing_skills = _skill_score(job, candidate["skills"])
     experience = _experience_score(job, resume, parsed_json)
     domain = _domain_score(job, parsed_json, candidate["raw_text"])
+    soft_skill = _soft_skill_score(job, candidate)
+    managerial_skill = _managerial_skill_score(job, candidate, parsed_json)
+    distance_bonus = _distance_priority_bonus(job, parsed_json, resume)
 
     final = _clamp_0_100(
-        (semantic * 0.15) +
-        (skill * 0.35) +
-        (experience * 0.30) +
-        (domain * 0.20)
+        (semantic * 0.14) +
+        (skill * 0.32) +
+        (experience * 0.27) +
+        (domain * 0.17) +
+        (soft_skill * 0.05) +
+        (managerial_skill * 0.05)
     )
+    final = _clamp_0_100(final + distance_bonus)
 
     confidence = _confidence_score(
         parsed_json,
@@ -715,6 +906,8 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         skill=skill,
         experience=experience,
         domain=domain,
+        soft_skill=soft_skill,
+        managerial_skill=managerial_skill,
     )
 
     reasons: list[str] = []
@@ -726,6 +919,14 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         reasons.append(f"Primary domain: {parsed_json.get('primary_domain')}")
     elif domain >= 50:
         reasons.append("Relevant domain overlap found")
+    if managerial_skill >= 70:
+        reasons.append("Demonstrated leadership/managerial indicators")
+    elif soft_skill >= 70:
+        reasons.append("Strong soft-skill signals in experience")
+    if distance_bonus >= 8:
+        reasons.append("Strong location proximity for role mode")
+    elif distance_bonus <= -8:
+        reasons.append("Distance may impact on-site/hybrid suitability")
 
     if not reasons:
         reasons = ["Resume parsed with limited matching signals"]
@@ -735,6 +936,9 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         skill=skill,
         experience=experience,
         domain=domain,
+        soft_skill=soft_skill,
+        managerial_skill=managerial_skill,
+        distance_priority_bonus=distance_bonus,
         final=final,
         confidence=confidence,
         matched_skills=matched_skills,
@@ -753,6 +957,7 @@ def _job_signature(job: Job) -> str:
         {
             "title": job.title or "",
             "description": job.description or "",
+            "work_mode": getattr(job, "work_mode", "remote") or "remote",
             "required_skills": job.required_skills or [],
             "nice_to_have_skills": job.nice_to_have_skills or [],
             "min_experience_years": float(job.min_experience_years) if job.min_experience_years is not None else None,
@@ -921,6 +1126,9 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "skill": result.skill,
                 "experience": result.experience,
                 "domain": result.domain,
+                "soft_skill": result.soft_skill,
+                "managerial_skill": result.managerial_skill,
+                "distance_priority_bonus": result.distance_priority_bonus,
             },
             "semantic_source": semantic_source,
             "semantic_components": semantic_components,
@@ -976,6 +1184,9 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "skill": result.skill,
                 "experience": result.experience,
                 "domain": result.domain,
+                "soft_skill": result.soft_skill,
+                "managerial_skill": result.managerial_skill,
+                "distance_priority_bonus": result.distance_priority_bonus,
             }
 
         matched = llm_output.get("matched_skills")

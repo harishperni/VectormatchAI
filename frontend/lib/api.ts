@@ -3,6 +3,7 @@ export type Job = {
   title: string;
   description: string;
   location?: string | null;
+  work_mode: "remote" | "hybrid" | "inperson";
   min_experience_years: number | null;
   required_skills: string[];
   nice_to_have_skills: string[];

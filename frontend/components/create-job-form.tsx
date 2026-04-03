@@ -20,6 +20,7 @@ export default function CreateJobForm() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
+  const [workMode, setWorkMode] = useState<"remote" | "hybrid" | "inperson">("remote");
   const [minExperience, setMinExperience] = useState("");
   const [requiredSkills, setRequiredSkills] = useState("");
   const [niceToHaveSkills, setNiceToHaveSkills] = useState("");
@@ -37,6 +38,7 @@ export default function CreateJobForm() {
         title: title.trim(),
         description: description.trim(),
         location: location.trim() || null,
+        work_mode: workMode,
         min_experience_years: minExperience.trim() ? Number(minExperience) : null,
         required_skills: toList(requiredSkills),
         nice_to_have_skills: toList(niceToHaveSkills),
@@ -56,6 +58,7 @@ export default function CreateJobForm() {
       setTitle("");
       setDescription("");
       setLocation("");
+      setWorkMode("remote");
       setMinExperience("");
       setRequiredSkills("");
       setNiceToHaveSkills("");
@@ -96,6 +99,19 @@ export default function CreateJobForm() {
             className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
             placeholder="Fort Worth, TX"
           />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+          Work Mode
+          <select
+            value={workMode}
+            onChange={(event) => setWorkMode(event.target.value as "remote" | "hybrid" | "inperson")}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          >
+            <option value="remote">Remote</option>
+            <option value="hybrid">Hybrid</option>
+            <option value="inperson">In-person</option>
+          </select>
         </label>
 
         <label className="flex flex-col gap-1 text-sm font-medium text-slate-700 md:col-span-2">
@@ -172,4 +188,3 @@ export default function CreateJobForm() {
     </section>
   );
 }
-

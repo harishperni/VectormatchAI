@@ -7,6 +7,7 @@ class JobCreate(BaseModel):
     title: str = Field(min_length=2, max_length=150)
     description: str = Field(min_length=20)
     location: str | None = None
+    work_mode: str = Field(default="remote", pattern="^(remote|hybrid|inperson)$")
     min_experience_years: float | None = None
     required_skills: list[str] = Field(default_factory=list)
     nice_to_have_skills: list[str] = Field(default_factory=list)
@@ -18,6 +19,7 @@ class JobOut(BaseModel):
     title: str
     description: str
     location: str | None
+    work_mode: str
     min_experience_years: float | None
     required_skills: list[str]
     nice_to_have_skills: list[str]
@@ -30,6 +32,7 @@ class JobUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=2, max_length=150)
     description: str | None = Field(default=None, min_length=20)
     location: str | None = None
+    work_mode: str | None = Field(default=None, pattern="^(remote|hybrid|inperson)$")
     min_experience_years: float | None = None
     required_skills: list[str] | None = None
     nice_to_have_skills: list[str] | None = None

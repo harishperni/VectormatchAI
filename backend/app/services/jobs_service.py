@@ -33,6 +33,7 @@ def create_job(db: Session, payload: JobCreate) -> Job:
         title=payload.title,
         description=payload.description,
         location=payload.location,
+        work_mode=payload.work_mode,
         min_experience_years=payload.min_experience_years,
         required_skills=payload.required_skills,
         nice_to_have_skills=payload.nice_to_have_skills,

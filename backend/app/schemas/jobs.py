@@ -27,4 +27,10 @@ class JobOut(BaseModel):
 
 
 class JobUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=150)
+    description: str | None = Field(default=None, min_length=20)
     location: str | None = None
+    min_experience_years: float | None = None
+    required_skills: list[str] | None = None
+    nice_to_have_skills: list[str] | None = None
+    domain_tags: list[str] | None = None

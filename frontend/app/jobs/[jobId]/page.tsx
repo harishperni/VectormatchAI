@@ -1,4 +1,5 @@
 import JobWorkspace from "@/components/job-workspace";
+import JobDetailsEditor from "@/components/job-details-editor";
 import JobsFilterPanel from "@/components/jobs-filter-panel";
 import {
   fetchJob,
@@ -105,7 +106,9 @@ export default async function JobRankingPage({
         <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
           Job not found in backend.
         </p>
-      ) : null}
+      ) : (
+        <JobDetailsEditor jobId={jobId} job={job} />
+      )}
       {rankingsError ? (
         <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
           Could not load rankings from backend right now.

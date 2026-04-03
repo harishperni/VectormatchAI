@@ -55,7 +55,9 @@ def get_job(db: Session, job_id: uuid.UUID) -> Job | None:
 
 
 def update_job(db: Session, job: Job, payload: JobUpdate) -> Job:
-    job.location = payload.location
+    updates = payload.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        setattr(job, key, value)
     db.add(job)
     db.commit()
     db.refresh(job)

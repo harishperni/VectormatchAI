@@ -333,6 +333,10 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
             for entry in experience_entries
             if isinstance(entry, dict)
         ]
+    result["experience_entries"] = _repair_experience_entries(
+        result.get("experience_entries", []),
+        current_last_job=result.get("current_last_job"),
+    )
 
     projects = parsed.get("projects", [])
     if isinstance(projects, list):
@@ -369,9 +373,16 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
 
     result["experience_entries"] = sort_experience_entries(result["experience_entries"])
 
-    if len(result["experience_entries"]) <= 1 and _count_date_ranges(raw_text) >= 3:
+    if _experience_entries_need_fallback(result["experience_entries"], raw_text):
         fallback_entries = _extract_experience_entries_from_text(raw_text)
-        if len(fallback_entries) > len(result["experience_entries"]):
+        merged_entries = _merge_experience_entries(result["experience_entries"], fallback_entries)
+        current_score = _experience_entries_quality_score(result["experience_entries"])
+        merged_score = _experience_entries_quality_score(merged_entries)
+        fallback_score = _experience_entries_quality_score(fallback_entries)
+
+        if merged_score >= max(current_score, fallback_score):
+            result["experience_entries"] = sort_experience_entries(merged_entries)
+        elif fallback_score > current_score:
             result["experience_entries"] = sort_experience_entries(fallback_entries)
 
     result["projects"] = [item for item in result["projects"] if not _is_empty_project(item)]
@@ -455,7 +466,7 @@ def _normalize_experience_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
             inferred_is_current = True
 
     return {
-        "company": _clean_string(entry.get("company")),
+        "company": _normalize_company_string(entry.get("company")),
         "title": _clean_string(entry.get("title")),
         "location": _clean_string(entry.get("location")),
         "start_date": start_date,
@@ -468,6 +479,183 @@ def _normalize_experience_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
         "achievements": _unique_clean_strings(entry.get("achievements", []))
         if isinstance(entry.get("achievements"), list) else [],
     }
+
+
+def _normalize_company_string(value: Any) -> str | None:
+    company = _clean_string(value)
+    if not company:
+        return None
+
+    # Drop label-only fragments that frequently appear in malformed OCR/LLM output.
+    if re.fullmatch(r"(?i)\s*(location|duration)\s*:?\s*", company):
+        return None
+
+    # Remove date range and explicit labels when they bleed into company.
+    company = _strip_date_range_from_text(company)
+    company = re.sub(r"(?i)\bduration\s*:\s*", " ", company)
+
+    parts = [part.strip() for part in re.split(r"\|", company) if part.strip()]
+    cleaned_parts: list[str] = []
+    for part in parts:
+        fragment = re.sub(r"(?i)\blocation\s*:\s*", "", part).strip()
+        if not fragment:
+            continue
+        if _extract_location_fragment(fragment):
+            continue
+        cleaned_parts.append(fragment)
+
+    if cleaned_parts:
+        return _clean_string(cleaned_parts[0])
+
+    fallback = re.sub(r"(?i)\blocation\s*:\s*", "", company).strip(" |,-")
+    if not fallback or _extract_location_fragment(fallback):
+        return None
+    return _clean_string(fallback)
+
+
+def _repair_experience_entries(entries: Any, *, current_last_job: Any) -> list[dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+
+    normalized_entries = [entry for entry in entries if isinstance(entry, dict)]
+    normalized_current_title = _clean_string(current_last_job)
+    current_filled = False
+
+    repaired: list[dict[str, Any]] = []
+    for entry in normalized_entries:
+        item = dict(entry)
+        item["company"] = _normalize_company_string(item.get("company"))
+        item["title"] = _clean_string(item.get("title"))
+        item["location"] = _clean_string(item.get("location")) or _extract_location_fragment(
+            _clean_string(entry.get("company")) or ""
+        )
+        item["description"] = _trim_experience_description(item.get("description"))
+        item["skills_used"] = _unique_clean_strings(item.get("skills_used", [])) if isinstance(item.get("skills_used"), list) else []
+        item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
+
+        if (
+            normalized_current_title
+            and not item.get("title")
+            and item.get("is_current") is True
+            and not current_filled
+        ):
+            item["title"] = normalized_current_title
+            current_filled = True
+
+        repaired.append(item)
+
+    return repaired
+
+
+def _experience_entries_quality_score(entries: Any) -> int:
+    if not isinstance(entries, list) or not entries:
+        return 0
+
+    score = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if _clean_string(entry.get("company")):
+            score += 2
+        if _clean_string(entry.get("title")):
+            score += 2
+        if _clean_string(entry.get("description")):
+            score += 2
+        if _clean_string(entry.get("location")):
+            score += 1
+        if _clean_date_string(entry.get("start_date")):
+            score += 1
+        if _clean_date_string(entry.get("end_date")) or entry.get("is_current") is True:
+            score += 1
+    return score
+
+
+def _experience_entries_need_fallback(entries: Any, raw_text: str) -> bool:
+    if not isinstance(entries, list):
+        return _count_date_ranges(raw_text) >= 2
+    if len(entries) <= 1:
+        return _count_date_ranges(raw_text) >= 2
+
+    weak_entries = 0
+    missing_company_entries = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            weak_entries += 1
+            missing_company_entries += 1
+            continue
+        company = _clean_string(entry.get("company"))
+        title = _clean_string(entry.get("title"))
+        description = _clean_string(entry.get("description"))
+        malformed_company = bool(company and re.search(r"(?i)\b(location|duration)\s*:", company))
+        if not company:
+            missing_company_entries += 1
+        if (not title and not description) or malformed_company:
+            weak_entries += 1
+
+    if weak_entries >= max(2, len(entries) // 2):
+        return True
+    if missing_company_entries >= max(2, len(entries) // 2) and _count_date_ranges(raw_text) >= len(entries):
+        return True
+    return False
+
+
+def _merge_experience_entries(
+    primary_entries: Any,
+    fallback_entries: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(primary_entries, list):
+        return fallback_entries if isinstance(fallback_entries, list) else []
+    if not isinstance(fallback_entries, list):
+        return [entry for entry in primary_entries if isinstance(entry, dict)]
+
+    fallback_by_key: dict[tuple[str | None, str | None, bool], dict[str, Any]] = {}
+    fallback_pool: list[dict[str, Any]] = []
+    for raw in fallback_entries:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        key = (
+            _clean_date_string(item.get("start_date")),
+            _clean_date_string(item.get("end_date")),
+            bool(item.get("is_current")),
+        )
+        fallback_by_key[key] = item
+        fallback_pool.append(item)
+
+    merged: list[dict[str, Any]] = []
+    for raw in primary_entries:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        key = (
+            _clean_date_string(item.get("start_date")),
+            _clean_date_string(item.get("end_date")),
+            bool(item.get("is_current")),
+        )
+        candidate = fallback_by_key.get(key)
+        if not candidate:
+            # Last chance match by start date only.
+            start = key[0]
+            for fallback in fallback_pool:
+                if _clean_date_string(fallback.get("start_date")) == start and start is not None:
+                    candidate = fallback
+                    break
+
+        if candidate:
+            if not _clean_string(item.get("company")):
+                item["company"] = _normalize_company_string(candidate.get("company"))
+            if not _clean_string(item.get("title")):
+                item["title"] = _clean_string(candidate.get("title"))
+            if not _clean_string(item.get("location")):
+                item["location"] = _clean_string(candidate.get("location"))
+            if not _clean_string(item.get("description")):
+                item["description"] = _trim_experience_description(candidate.get("description"))
+            if (not isinstance(item.get("skills_used"), list) or not item.get("skills_used")) and isinstance(candidate.get("skills_used"), list):
+                item["skills_used"] = _unique_clean_strings(candidate.get("skills_used", []))
+
+        merged.append(item)
+
+    return merged
 
 
 def _normalize_certification_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
@@ -820,7 +1008,11 @@ def _looks_like_org_line(value: str) -> bool:
         return False
 
     lowered = line.lower()
-    if len(line.split()) < 2:
+    words = [w for w in re.split(r"\s+", line) if w]
+    if len(words) < 2:
+        # Allow single-word organization names like "Caterpillar".
+        if len(words) == 1 and re.match(r"^[A-Z][A-Za-z&'.-]{2,}$", words[0]):
+            return True
         return False
     if line.endswith("."):
         return False
@@ -846,6 +1038,23 @@ def _looks_like_org_line(value: str) -> bool:
     if any(f" {verb} " in f" {lowered} " for verb in verb_signals):
         return False
 
+    role_signals = {
+        "developer",
+        "engineer",
+        "analyst",
+        "administrator",
+        "architect",
+        "consultant",
+        "intern",
+        "manager",
+        "specialist",
+        "coordinator",
+        "lead",
+        "officer",
+    }
+    if any(re.search(rf"\b{signal}\b", lowered) for signal in role_signals):
+        return False
+
     org_signals = {
         "foundation",
         "fund",
@@ -865,7 +1074,6 @@ def _looks_like_org_line(value: str) -> bool:
     if any(signal in lowered for signal in org_signals):
         return True
 
-    words = [w for w in re.split(r"\s+", line) if w]
     title_like = sum(1 for w in words if re.match(r"^[A-Z][a-zA-Z&'.-]*$", w))
     return title_like >= max(2, len(words) - 1)
 
@@ -1257,16 +1465,41 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
         if not start_date and not end_date and not is_current:
             continue
 
-        company_part = re.split(r"\s+-\s+", line, maxsplit=1)[0].strip()
-        location_match = re.search(r"\b([A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+))(?:\s*/\s*[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+))*\b", company_part)
-        location = _clean_string(location_match.group(1)) if location_match else None
-        company = _clean_string(re.sub(r",\s*[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+).*$", "", company_part))
+        line_without_dates = _strip_date_range_from_text(line)
+        location = _extract_location_fragment(line_without_dates)
+        company = _normalize_company_string(line_without_dates)
+
+        # When the date line is just "Location: X | Duration: ...", recover
+        # company/title from neighboring lines.
+        if not company and idx > 0:
+            for back in (1, 2):
+                prev_idx = idx - back
+                if prev_idx < 0:
+                    continue
+                prev_line = _clean_string(lines[prev_idx])
+                if not prev_line:
+                    continue
+                if _extract_date_range_from_text(prev_line) != (None, None, False):
+                    continue
+                if _looks_like_org_line(prev_line):
+                    company = _normalize_company_string(prev_line)
+                    break
 
         title = None
         if idx + 1 < len(lines):
             next_line = lines[idx + 1]
-            if len(next_line.split()) <= 14 and not re.search(r"(role and responsibilities|technologies|project|education)", next_line, re.IGNORECASE):
+            if (
+                len(next_line.split()) <= 14
+                and not re.search(r"(role and responsibilities|technologies|project|education)", next_line, re.IGNORECASE)
+                and not _looks_like_org_line(next_line)
+            ):
                 title = _clean_string(next_line)
+        if not title and idx > 0:
+            prev_line = lines[idx - 1]
+            if len(prev_line.split()) <= 14 and not re.search(r"(location|duration|project|education|experience)", prev_line, re.IGNORECASE):
+                prev_line_clean = _clean_string(prev_line)
+                if prev_line_clean and not _looks_like_org_line(prev_line_clean):
+                    title = prev_line_clean
 
         entries.append(
             {

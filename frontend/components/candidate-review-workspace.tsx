@@ -29,6 +29,23 @@ function mapActionToStage(action?: string | null): string {
   return "New";
 }
 
+function stageBadgeClass(stage: string): string {
+  const value = stage.toLowerCase();
+  if (value === "shortlisted") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (value === "interview") return "border-sky-200 bg-sky-50 text-sky-700";
+  if (value === "offer") return "border-indigo-200 bg-indigo-50 text-indigo-700";
+  if (value === "rejected") return "border-rose-200 bg-rose-50 text-rose-700";
+  if (value === "review") return "border-amber-200 bg-amber-50 text-amber-700";
+  return "border-slate-200 bg-slate-50 text-slate-700";
+}
+
+function scoreBadgeClass(score?: number | null): string {
+  if (score === null || score === undefined) return "border-slate-200 bg-slate-50 text-slate-700";
+  if (score >= 80) return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (score >= 65) return "border-amber-200 bg-amber-50 text-amber-700";
+  return "border-rose-200 bg-rose-50 text-rose-700";
+}
+
 export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props) {
   const [actionMessage, setActionMessage] = useState("Ready");
   const [page, setPage] = useState(1);
@@ -160,39 +177,42 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
   return (
     <>
       <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
+        <div className="space-y-3 border-b border-slate-200 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="font-heading text-xl font-semibold text-slate-900">Applicants</h2>
             <p className="text-xs text-slate-500">
               Showing {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, rows.length)} of {rows.length}
             </p>
           </div>
+          <p className="text-xs text-slate-500">{selectedIds.length} selected</p>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => saveBulkAction("shortlisted")}
-              className="rounded border border-emerald-300 px-2 py-1 text-xs font-semibold text-emerald-700"
+              className="rounded-lg border border-emerald-300 px-2.5 py-1 text-xs font-semibold text-emerald-700"
             >
               Bulk Recommend
             </button>
             <button
               onClick={() => saveBulkAction("rejected")}
-              className="rounded border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700"
+              className="rounded-lg border border-rose-300 px-2.5 py-1 text-xs font-semibold text-rose-700"
             >
               Bulk Reject
             </button>
             <button
               onClick={() => saveBulkAction("shortlisted", "recommended_for_other_jobs")}
-              className="rounded border border-violet-300 px-2 py-1 text-xs font-semibold text-violet-700"
+              className="rounded-lg border border-violet-300 px-2.5 py-1 text-xs font-semibold text-violet-700"
             >
-              Recommend Other Jobs
+              Bulk Recommend Other Jobs
             </button>
-            <p className="text-xs text-slate-500">{actionMessage}</p>
           </div>
+          <p className="text-xs text-slate-500">{actionMessage}</p>
         </div>
 
         <div className="max-h-[68vh] overflow-y-auto">
           <div className="w-full overflow-x-auto">
-            <table className="w-full min-w-[1320px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[1260px] border-collapse text-left text-sm">
               <thead className="sticky top-0 z-20 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="border-b border-slate-200 px-3 py-2">
@@ -207,7 +227,6 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                   <th className="hidden border-b border-slate-200 px-3 py-2 2xl:table-cell">Type</th>
                   <th className="border-b border-slate-200 px-3 py-2">Applied</th>
                   <th className="border-b border-slate-200 px-3 py-2">Stage</th>
-                  <th className="hidden border-b border-slate-200 px-3 py-2 xl:table-cell">Step</th>
                   <th className="border-b border-slate-200 px-3 py-2">Current/Last Job</th>
                   <th className="border-b border-slate-200 px-3 py-2">Relevant Experience</th>
                   <th className="border-b border-slate-200 px-3 py-2">Highest Degree</th>
@@ -237,8 +256,11 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                     </td>
                     <td className="hidden px-3 py-2 text-slate-700 2xl:table-cell">{row.candidate_type ?? "External"}</td>
                     <td className="px-3 py-2 text-slate-700">{formatApplied(row.applied_at)}</td>
-                    <td className="px-3 py-2 text-slate-700">{mapActionToStage(row.action_status)}</td>
-                    <td className="hidden px-3 py-2 text-slate-700 xl:table-cell">{mapActionToStage(row.action_status)}</td>
+                    <td className="px-3 py-2 text-slate-700">
+                      <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${stageBadgeClass(mapActionToStage(row.action_status))}`}>
+                        {mapActionToStage(row.action_status)}
+                      </span>
+                    </td>
                     <td className="px-3 py-2 text-slate-700">{row.current_last_job ?? "-"}</td>
                     <td className="px-3 py-2 text-slate-700">
                       {row.experience_years !== null && row.experience_years !== undefined
@@ -251,7 +273,11 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                         ? `${Math.trunc(row.distance_miles)} miles`
                         : "-"}
                     </td>
-                    <td className="px-3 py-2 font-semibold text-slate-900">{row.score}%</td>
+                    <td className="px-3 py-2 font-semibold text-slate-900">
+                      <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${scoreBadgeClass(row.score)}`}>
+                        {row.score}%
+                      </span>
+                    </td>
                     <td className="hidden px-3 py-2 text-xs text-slate-700 lg:table-cell">
                       <div className="max-w-[260px] space-y-1">
                         <p className="font-medium text-slate-800">
@@ -272,13 +298,13 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                       <div className="flex flex-wrap gap-1">
                         <button
                           onClick={() => saveAction(row.candidate_id, "shortlisted")}
-                          className="rounded border border-emerald-300 px-2 py-0.5 text-xs font-semibold text-emerald-700"
+                          className="rounded border border-emerald-300 px-2 py-0.5 text-[11px] font-semibold text-emerald-700"
                         >
                           Recommend
                         </button>
                         <button
                           onClick={() => saveAction(row.candidate_id, "interviewed")}
-                          className="rounded border border-sky-300 px-2 py-0.5 text-xs font-semibold text-sky-700"
+                          className="rounded border border-sky-300 px-2 py-0.5 text-[11px] font-semibold text-sky-700"
                         >
                           Contact
                         </button>
@@ -286,9 +312,9 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                           onClick={() =>
                             saveAction(row.candidate_id, "shortlisted", "recommended_for_other_jobs")
                           }
-                          className="rounded border border-violet-300 px-2 py-0.5 text-xs font-semibold text-violet-700"
+                          className="rounded border border-violet-300 px-2 py-0.5 text-[11px] font-semibold text-violet-700"
                         >
-                          Recommend Other Jobs
+                          Other Jobs
                         </button>
                       </div>
                     </td>
@@ -332,9 +358,14 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                   <h3 className="font-heading text-2xl font-semibold text-slate-900">
                     {selectedRow?.candidate_name ?? "Candidate Profile"}
                   </h3>
-                  <p className="text-sm text-slate-600">
-                    Match {selectedRow?.score ?? "N/A"}% • Confidence {selectedRow?.confidence ?? "N/A"}%
-                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold ${scoreBadgeClass(selectedRow?.score)}`}>
+                      Match {selectedRow?.score ?? "N/A"}%
+                    </span>
+                    <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                      Confidence {selectedRow?.confidence ?? "N/A"}%
+                    </span>
+                  </div>
                 </div>
                 <button onClick={closeDrawer} className="rounded border border-slate-300 px-3 py-1 text-sm">
                   Close
@@ -352,9 +383,11 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
 
               <article className="rounded-lg border border-slate-200 p-3">
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Personal Details</p>
-                <p className="mt-2 text-sm text-slate-700">Candidate: {selectedRow?.candidate_name ?? "N/A"}</p>
-                <p className="text-sm text-slate-700">Email: {selectedResume?.email ?? "N/A"}</p>
-                <p className="text-sm text-slate-700">Resume File: {selectedResume?.source_filename ?? "N/A"}</p>
+                <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2">
+                  <p>Candidate: {selectedRow?.candidate_name ?? "N/A"}</p>
+                  <p>Email: {selectedResume?.email ?? "N/A"}</p>
+                  <p className="sm:col-span-2">Resume File: {selectedResume?.source_filename ?? "N/A"}</p>
+                </div>
               </article>
 
               <article className="rounded-lg border border-slate-200 p-3">
@@ -387,27 +420,37 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
               </article>
 
               <article className="rounded-lg border border-slate-200 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Rubric Scores</p>
-                <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2">
-                  <p>Semantic Fit: {explanation?.rubric_scores?.semantic_fit ?? "N/A"}</p>
-                  <p>Skill Fit: {explanation?.rubric_scores?.skill_fit ?? "N/A"}</p>
-                  <p>Experience Fit: {explanation?.rubric_scores?.experience_fit ?? "N/A"}</p>
-                  <p>Domain Fit: {explanation?.rubric_scores?.domain_fit ?? "N/A"}</p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Score Comparison</p>
+                <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-3">
+                  <p>Ranking Score: {selectedRow?.score ?? "N/A"}</p>
+                  <p>LLM Score: {explanation?.llm_score ?? "N/A"}</p>
+                  <p>
+                    Delta:{" "}
+                    {selectedRow?.score !== undefined &&
+                    explanation?.llm_score !== undefined &&
+                    explanation?.llm_score !== null
+                      ? (explanation.llm_score - selectedRow.score).toFixed(2)
+                      : "N/A"}
+                  </p>
                 </div>
               </article>
 
               <article className="rounded-lg border border-slate-200 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Matched Skills</p>
-                <p className="mt-2 text-sm text-slate-700">
-                  {explanation?.matched_skills?.length ? explanation.matched_skills.join(", ") : "None detected"}
-                </p>
-              </article>
-
-              <article className="rounded-lg border border-slate-200 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Missing Skills</p>
-                <p className="mt-2 text-sm text-slate-700">
-                  {explanation?.missing_skills?.length ? explanation.missing_skills.join(", ") : "None"}
-                </p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Skills Fit</p>
+                <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600">Matched</p>
+                    <p className="mt-1 text-sm text-slate-700">
+                      {explanation?.matched_skills?.length ? explanation.matched_skills.join(", ") : "None detected"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600">Missing</p>
+                    <p className="mt-1 text-sm text-slate-700">
+                      {explanation?.missing_skills?.length ? explanation.missing_skills.join(", ") : "None"}
+                    </p>
+                  </div>
+                </div>
               </article>
 
               <article className="rounded-lg border border-slate-200 p-3">

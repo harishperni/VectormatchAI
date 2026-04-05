@@ -129,57 +129,53 @@ export default function JobWorkspace({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => {
-              setActiveTab("workspace");
-              try {
-                window.localStorage.setItem(tabStorageKey, "workspace");
-              } catch {
-                // ignore storage errors
-              }
-            }}
-            className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-              activeTab === "workspace"
-                ? "border-slate-900 bg-slate-900 text-white"
-                : "border-slate-300 bg-white text-slate-700"
-            }`}
-          >
-            Workspace
-          </button>
-          <button
-            onClick={() => {
-              setActiveTab("tasks");
-              try {
-                window.localStorage.setItem(tabStorageKey, "tasks");
-              } catch {
-                // ignore storage errors
-              }
-            }}
-            className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-              activeTab === "tasks"
-                ? "border-slate-900 bg-slate-900 text-white"
-                : "border-slate-300 bg-white text-slate-700"
-            }`}
-          >
-            Tasks
-          </button>
-          <button
-            onClick={() => {
-              setActiveTab("quality");
-              try {
-                window.localStorage.setItem(tabStorageKey, "quality");
-              } catch {
-                // ignore storage errors
-              }
-            }}
-            className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-              activeTab === "quality"
-                ? "border-slate-900 bg-slate-900 text-white"
-                : "border-slate-300 bg-white text-slate-700"
-            }`}
-          >
-            Quality
-          </button>
+          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+            <button
+              onClick={() => {
+                setActiveTab("workspace");
+                try {
+                  window.localStorage.setItem(tabStorageKey, "workspace");
+                } catch {
+                  // ignore storage errors
+                }
+              }}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+                activeTab === "workspace" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+              }`}
+            >
+              Workspace
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab("tasks");
+                try {
+                  window.localStorage.setItem(tabStorageKey, "tasks");
+                } catch {
+                  // ignore storage errors
+                }
+              }}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+                activeTab === "tasks" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+              }`}
+            >
+              Tasks
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab("quality");
+                try {
+                  window.localStorage.setItem(tabStorageKey, "quality");
+                } catch {
+                  // ignore storage errors
+                }
+              }}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+                activeTab === "quality" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+              }`}
+            >
+              Quality
+            </button>
+          </div>
           <button
             onClick={() =>
               setShowPipeline((prev) => {

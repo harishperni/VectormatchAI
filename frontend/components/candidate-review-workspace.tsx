@@ -211,8 +211,8 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
         </div>
 
         <div className="max-h-[68vh] overflow-y-auto">
-          <div className="w-full overflow-x-auto">
-            <table className="w-full min-w-[1260px] border-collapse text-left text-sm">
+          <div className="w-full overflow-x-auto overscroll-x-contain">
+            <table className="w-full min-w-[1120px] border-collapse text-left text-sm xl:min-w-[1200px]">
               <thead className="sticky top-0 z-20 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="border-b border-slate-200 px-3 py-2">
@@ -223,7 +223,7 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                       aria-label="Select page candidates"
                     />
                   </th>
-                  <th className="sticky left-0 z-30 border-b border-slate-200 bg-slate-50 px-3 py-2">Name</th>
+                  <th className="sticky left-0 z-30 w-[180px] border-b border-slate-200 bg-slate-50 px-3 py-2">Name</th>
                   <th className="hidden border-b border-slate-200 px-3 py-2 2xl:table-cell">Type</th>
                   <th className="border-b border-slate-200 px-3 py-2">Applied</th>
                   <th className="border-b border-slate-200 px-3 py-2">Stage</th>
@@ -232,7 +232,7 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                   <th className="border-b border-slate-200 px-3 py-2">Highest Degree</th>
                   <th className="border-b border-slate-200 px-3 py-2">Distance</th>
                   <th className="border-b border-slate-200 px-3 py-2">Score</th>
-                  <th className="hidden border-b border-slate-200 px-3 py-2 lg:table-cell">Audit</th>
+                  <th className="hidden w-[360px] border-b border-slate-200 px-3 py-2 lg:table-cell">Audit</th>
                   <th className="sticky right-0 z-30 border-b border-slate-200 bg-slate-50 px-3 py-2">Actions</th>
                 </tr>
               </thead>
@@ -251,8 +251,8 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                         aria-label={`Select ${row.candidate_name}`}
                       />
                     </td>
-                    <td className="sticky left-0 z-10 bg-white px-3 py-2 font-semibold text-slate-900 group-hover:bg-slate-50">
-                      {row.candidate_name}
+                    <td className="sticky left-0 z-10 w-[180px] bg-white px-3 py-2 font-semibold text-slate-900 group-hover:bg-slate-50">
+                      <p className="line-clamp-2 break-words">{row.candidate_name}</p>
                     </td>
                     <td className="hidden px-3 py-2 text-slate-700 2xl:table-cell">{row.candidate_type ?? "External"}</td>
                     <td className="px-3 py-2 text-slate-700">{formatApplied(row.applied_at)}</td>
@@ -278,17 +278,17 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                         {row.score}%
                       </span>
                     </td>
-                    <td className="hidden px-3 py-2 text-xs text-slate-700 lg:table-cell">
-                      <div className="max-w-[260px] space-y-1">
+                    <td className="hidden w-[360px] px-3 py-2 text-xs text-slate-700 lg:table-cell">
+                      <div className="max-w-[340px] space-y-1">
                         <p className="font-medium text-slate-800">
                           {row.audit_summary ?? (row.audit_flags?.length ? row.audit_flags[0] : "OK")}
                         </p>
                         {row.audit_detail?.length ? (
-                          <p className="line-clamp-2 text-[11px] leading-4 text-slate-500">
+                          <p className="line-clamp-3 text-[11px] leading-4 text-slate-500">
                             {row.audit_detail.join(" | ")}
                           </p>
                         ) : row.audit_flags?.length ? (
-                          <p className="line-clamp-2 text-[11px] leading-4 text-slate-500">
+                          <p className="line-clamp-3 text-[11px] leading-4 text-slate-500">
                             {row.audit_flags.join(" | ")}
                           </p>
                         ) : null}

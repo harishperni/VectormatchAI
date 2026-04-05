@@ -120,7 +120,7 @@ export default function JobWorkspace({
   }, [localResumes, jobId]);
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4 overflow-x-hidden">
       <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
         <div>
           <p className="text-xs uppercase tracking-wide text-slate-500">Workspace</p>

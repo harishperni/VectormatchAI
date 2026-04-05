@@ -97,7 +97,7 @@ export default async function JobRankingPage({
   }
 
   return (
-    <main className="mx-auto w-full max-w-[1500px] px-4 py-5 xl:px-6">
+    <main className="mx-auto w-full max-w-[1500px] overflow-x-hidden px-4 py-5 xl:px-6">
       <div>
         <h1 className="font-heading text-3xl font-bold text-ink">{job?.title ?? "Candidate Rankings"}</h1>
         <p className="mt-2 text-slate-600">Job ID: {jobId}</p>
@@ -115,7 +115,7 @@ export default async function JobRankingPage({
         </p>
       ) : null}
 
-      <section className="grid gap-4 xl:grid-cols-[260px,1fr]">
+      <section className="grid min-w-0 gap-4 xl:grid-cols-[260px,minmax(0,1fr)]">
         <JobsFilterPanel
           initial={{
             min_score: minScoreValue ?? defaultFilters.min_score,
@@ -133,7 +133,9 @@ export default async function JobRankingPage({
           }}
         />
 
-        <JobWorkspace jobId={jobId} rankings={rankings} resumes={resumes} />
+        <div className="min-w-0">
+          <JobWorkspace jobId={jobId} rankings={rankings} resumes={resumes} />
+        </div>
       </section>
     </main>
   );

@@ -97,26 +97,35 @@ export default function ParsedResumesTable({ jobId, rows, onDeleted }: Props) {
       ) : null}
 
       {rows.length > 0 ? (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overscroll-x-contain">
           <table className="w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-slate-100 text-slate-500">
-                <th className="py-2 pr-3">Candidate</th>
-                <th className="py-2 pr-3">Email</th>
-                <th className="py-2 pr-3">File</th>
+                <th className="w-[140px] py-2 pr-3">Candidate</th>
+                <th className="hidden w-[150px] py-2 pr-3 lg:table-cell">Email</th>
+                <th className="hidden w-[160px] py-2 pr-3 md:table-cell">File</th>
                 <th className="py-2 pr-3">Status</th>
-                <th className="py-2 pr-3">Experience</th>
-                <th className="py-2 pr-3">Skills</th>
-                <th className="py-2 pr-3">Parse Error</th>
+                <th className="hidden py-2 pr-3 sm:table-cell">Experience</th>
+                <th className="hidden w-[380px] py-2 pr-3 xl:table-cell">Skills</th>
+                <th className="hidden py-2 pr-3 xl:table-cell">Parse Error</th>
                 <th className="py-2">Actions</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.job_resume_id} className="border-b border-slate-50 align-top">
-                  <td className="py-2 pr-3 font-medium text-slate-900">{row.candidate_name}</td>
-                  <td className="py-2 pr-3 text-slate-700">{row.email ?? "-"}</td>
-                  <td className="py-2 pr-3 text-slate-700">{row.source_filename ?? "-"}</td>
+                  <td className="w-[140px] py-2 pr-3 font-medium text-slate-900">
+                    <p className="line-clamp-2 break-words">{row.candidate_name}</p>
+                    <p className="mt-0.5 line-clamp-2 break-words text-xs text-slate-500 md:hidden">
+                      {row.source_filename ?? "-"}
+                    </p>
+                  </td>
+                  <td className="hidden w-[150px] py-2 pr-3 text-slate-700 lg:table-cell">
+                    <p className="line-clamp-2 break-words">{row.email ?? "-"}</p>
+                  </td>
+                  <td className="hidden w-[160px] py-2 pr-3 text-slate-700 md:table-cell">
+                    <p className="line-clamp-2 break-words">{row.source_filename ?? "-"}</p>
+                  </td>
                   <td className="py-2 pr-3">
                     <span
                       className={`rounded-full border px-2 py-1 text-xs font-semibold ${statusClass(row.parse_status)}`}
@@ -124,13 +133,24 @@ export default function ParsedResumesTable({ jobId, rows, onDeleted }: Props) {
                       {row.parse_status}
                     </span>
                   </td>
-                  <td className="py-2 pr-3 text-slate-700">
+                  <td className="hidden py-2 pr-3 text-slate-700 sm:table-cell">
                     {row.experience_years !== null ? `${row.experience_years} yrs` : "-"}
                   </td>
-                  <td className="py-2 pr-3 text-slate-700">
-                    {row.skills.length > 0 ? row.skills.slice(0, 6).join(", ") : "-"}
+                  <td className="hidden w-[380px] py-2 pr-3 text-slate-700 xl:table-cell">
+                    {row.skills.length > 0 ? (
+                      <div>
+                        <p className="line-clamp-2 break-words">
+                          {row.skills.slice(0, 8).join(", ")}
+                        </p>
+                        {row.skills.length > 8 ? (
+                          <p className="mt-0.5 text-xs text-slate-500">+{row.skills.length - 8} more</p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      "-"
+                    )}
                   </td>
-                  <td className="py-2 pr-3 text-rose-700">{row.parse_error ?? "-"}</td>
+                  <td className="hidden max-w-[280px] py-2 pr-3 text-rose-700 xl:table-cell">{row.parse_error ?? "-"}</td>
                   <td className="py-2">
                     <div className="flex items-center gap-2">
                       <button

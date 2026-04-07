@@ -25,7 +25,7 @@ from app.services.embedding_service import (
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 
-SCORING_VERSION = "score_v9_structured_v1_relocation_distance"
+SCORING_VERSION = "score_v11_structured_v1_anti_cheat_guard"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"
@@ -80,6 +80,8 @@ class RankingComputation:
     soft_skill: float
     managerial_skill: float
     distance_priority_bonus: float
+    anti_cheat_penalty: float
+    anti_cheat_flags: list[str]
     final: float
     confidence: float
     matched_skills: list[str]
@@ -736,7 +738,7 @@ def _managerial_skill_score(job: Job, candidate_features: dict[str, Any], parsed
 def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resume) -> float:
     work_mode = str(getattr(job, "work_mode", "remote") or "remote").lower().strip()
     willing_to_relocate = parsed_json.get("willing_to_relocate")
-    willing: bool | None = willing_to_relocate if isinstance(willing_to_relocate, bool) else None
+    willing: bool = willing_to_relocate if isinstance(willing_to_relocate, bool) else True
 
     distance_value = parsed_json.get("distance_miles")
     distance_miles: float | None = float(distance_value) if isinstance(distance_value, (int, float)) else None
@@ -749,8 +751,6 @@ def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resu
             distance_miles = float(computed)
 
     if work_mode == "remote":
-        if distance_miles is not None and distance_miles > 200 and willing is False:
-            return -3.0
         return 0.0
 
     # For hybrid/in-person, prioritize either nearby candidates (<=50 miles)
@@ -786,6 +786,80 @@ def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resu
     if distance_miles <= 200:
         return -3.0
     return -8.0 if work_mode == "inperson" else -6.0
+
+
+def _anti_cheat_penalty(
+    job: Job,
+    resume: Resume,
+    candidate_features: dict[str, Any],
+    matched_skills: list[str],
+) -> tuple[float, list[str]]:
+    text = str(candidate_features.get("raw_text") or resume.raw_text or "")
+    lowered = text.lower()
+    if not lowered.strip():
+        return 0.0, []
+
+    flags: list[str] = []
+    penalty = 0.0
+
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9+#]{1,29}", lowered)
+    token_count = len(tokens)
+    if token_count >= 120:
+        freq: dict[str, int] = {}
+        for token in tokens:
+            if len(token) < 3:
+                continue
+            freq[token] = freq.get(token, 0) + 1
+
+        if freq:
+            top_token, top_count = max(freq.items(), key=lambda item: item[1])
+            top_ratio = top_count / max(1, token_count)
+            if top_ratio >= 0.06 and top_count >= 20:
+                penalty += 8.0
+                flags.append(f"Unusual repetition of '{top_token}'")
+            elif top_ratio >= 0.04 and top_count >= 16:
+                penalty += 5.0
+                flags.append("High repeated keyword density detected")
+
+            unique_ratio = len(freq) / max(1, token_count)
+            if unique_ratio <= 0.22:
+                penalty += 3.0
+                flags.append("Low lexical diversity in resume text")
+
+    required = _normalize_skill_names([str(skill) for skill in (job.required_skills or []) if skill])
+    if required:
+        stuffed_required = 0
+        for req in required:
+            req_count = len(re.findall(rf"\b{re.escape(req)}\b", lowered))
+            if req_count >= 10:
+                stuffed_required += 1
+        if stuffed_required >= 2:
+            penalty += 6.0
+            flags.append("Possible required-skill keyword stuffing")
+        elif stuffed_required == 1:
+            penalty += 3.0
+            flags.append("Repeated required-skill keyword pattern")
+
+    parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
+    experiences = parsed_json.get("experience_entries", [])
+    if isinstance(experiences, list) and len(experiences) >= 2:
+        desc_missing = 0
+        for entry in experiences[:4]:
+            if not isinstance(entry, dict):
+                desc_missing += 1
+                continue
+            if not str(entry.get("description") or "").strip():
+                desc_missing += 1
+        listed_skill_count = len(candidate_features.get("skills", []))
+        if listed_skill_count >= 35 and desc_missing >= 3:
+            penalty += 4.0
+            flags.append("Large skill list with weak supporting experience detail")
+
+    if not matched_skills and len(required) >= 3 and len(candidate_features.get("skills", [])) >= 25:
+        penalty += 2.0
+        flags.append("Many listed skills but weak required-skill evidence")
+
+    return min(15.0, round(penalty, 2)), flags[:3]
 
 
 def _confidence_score(
@@ -846,10 +920,12 @@ def _explainability_audit_flags(
     score_breakdown: dict[str, float],
     matched_skills: list[str],
     missing_skills: list[str],
+    anti_cheat_flags: list[str] | None = None,
 ) -> list[str]:
     flags: list[str] = []
     semantic = float(score_breakdown.get("semantic", 0.0))
     experience = float(score_breakdown.get("experience", 0.0))
+    anti_cheat_penalty = float(score_breakdown.get("anti_cheat_penalty", 0.0))
 
     if score >= 80 and len(missing_skills) >= 2:
         flags.append("High score despite multiple missing skills")
@@ -859,6 +935,10 @@ def _explainability_audit_flags(
         flags.append("Very high confidence with weak skill evidence")
     if experience <= 10 and score >= 70:
         flags.append("Strong rank even though experience signal is weak")
+    if anti_cheat_penalty >= 6:
+        flags.append("Potential ATS-gaming pattern detected")
+    if anti_cheat_flags:
+        flags.extend(str(item) for item in anti_cheat_flags[:2] if str(item).strip())
     return flags
 
 
@@ -911,6 +991,12 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
     soft_skill = _soft_skill_score(job, candidate)
     managerial_skill = _managerial_skill_score(job, candidate, parsed_json)
     distance_bonus = _distance_priority_bonus(job, parsed_json, resume)
+    anti_cheat_penalty, anti_cheat_flags = _anti_cheat_penalty(
+        job,
+        resume,
+        candidate,
+        matched_skills,
+    )
 
     final = _clamp_0_100(
         (semantic * 0.14) +
@@ -921,6 +1007,7 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         (managerial_skill * 0.05)
     )
     final = _clamp_0_100(final + distance_bonus)
+    final = _clamp_0_100(final - anti_cheat_penalty)
 
     confidence = _confidence_score(
         parsed_json,
@@ -951,6 +1038,8 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         reasons.append("Strong location proximity for role mode")
     elif distance_bonus <= -8:
         reasons.append("Distance may impact on-site/hybrid suitability")
+    if anti_cheat_penalty >= 6:
+        reasons.append("Ranking adjusted due to suspicious keyword stuffing patterns")
 
     if not reasons:
         reasons = ["Resume parsed with limited matching signals"]
@@ -963,6 +1052,8 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         soft_skill=soft_skill,
         managerial_skill=managerial_skill,
         distance_priority_bonus=distance_bonus,
+        anti_cheat_penalty=anti_cheat_penalty,
+        anti_cheat_flags=anti_cheat_flags,
         final=final,
         confidence=confidence,
         matched_skills=matched_skills,
@@ -1153,6 +1244,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "soft_skill": result.soft_skill,
                 "managerial_skill": result.managerial_skill,
                 "distance_priority_bonus": result.distance_priority_bonus,
+                "anti_cheat_penalty": result.anti_cheat_penalty,
             },
             "semantic_source": semantic_source,
             "semantic_components": semantic_components,
@@ -1160,6 +1252,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             "base_confidence": result.confidence,
             "matched_skills": result.matched_skills,
             "missing_skills": result.missing_skills,
+            "anti_cheat_flags": result.anti_cheat_flags,
             "evidence_snippets": evidence_snippets,
             "summary": " | ".join(result.reasons),
             "top_reasons": result.reasons,
@@ -1211,6 +1304,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "soft_skill": result.soft_skill,
                 "managerial_skill": result.managerial_skill,
                 "distance_priority_bonus": result.distance_priority_bonus,
+                "anti_cheat_penalty": result.anti_cheat_penalty,
             }
 
         matched = llm_output.get("matched_skills")
@@ -1507,6 +1601,9 @@ def get_rankings_for_job(
             else {},
             matched_skills=matched_skills,
             missing_skills=missing_skills,
+            anti_cheat_flags=payload.get("anti_cheat_flags", [])
+            if isinstance(payload.get("anti_cheat_flags", []), list)
+            else [],
         )
         output.append(
             {
@@ -1584,6 +1681,7 @@ def get_candidate_explanation(
         "rubric_scores": payload.get("rubric_scores", {}),
         "matched_skills": payload.get("matched_skills", []),
         "missing_skills": payload.get("missing_skills", []),
+        "anti_cheat_flags": payload.get("anti_cheat_flags", []),
         "evidence_snippets": payload.get("evidence_snippets", []),
         "summary": payload.get("summary", "No explanation available."),
         "model_version": model_version,

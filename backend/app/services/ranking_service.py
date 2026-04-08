@@ -835,27 +835,40 @@ def _anti_cheat_penalty(
                 flags.append("Low lexical diversity in resume text")
 
     required = _normalize_skill_names([str(skill) for skill in (job.required_skills or []) if skill])
-    if required:
-        stuffed_required = 0
-        for req in required:
-            req_count = len(re.findall(rf"\b{re.escape(req)}\b", lowered))
-            if req_count >= 10:
-                stuffed_required += 1
-        if stuffed_required >= 2:
-            penalty += 6.0
-            flags.append("Possible required-skill keyword stuffing")
-        elif stuffed_required == 1:
-            penalty += 3.0
-            flags.append("Repeated required-skill keyword pattern")
-
     parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
     experiences = parsed_json.get("experience_entries", [])
-    if isinstance(experiences, list) and len(experiences) >= 2:
+    normalized_experiences = [entry for entry in experiences if isinstance(entry, dict)] if isinstance(experiences, list) else []
+    if required:
+        stuffed_required = 0
+        entry_level_overuse = 0
+        experience_count = max(0, len(normalized_experiences))
+        allowed_total_occurrences = (experience_count * 5) + 5
+
+        for req in required:
+            req_count_total = len(re.findall(rf"\b{re.escape(req)}\b", lowered))
+            if req_count_total > allowed_total_occurrences:
+                stuffed_required += 1
+
+            for entry in normalized_experiences[:6]:
+                title = str(entry.get("title") or "").lower()
+                desc = str(entry.get("description") or "").lower()
+                skills_used = " ".join(str(s).lower() for s in (entry.get("skills_used") or []) if s)
+                entry_text = f"{title} {desc} {skills_used}"
+                req_count_entry = len(re.findall(rf"\b{re.escape(req)}\b", entry_text))
+                if req_count_entry > 5:
+                    entry_level_overuse += 1
+                    break
+
+        if stuffed_required >= 2 or entry_level_overuse >= 2:
+            penalty += 6.0
+            flags.append("Possible required-skill keyword stuffing across experience history")
+        elif stuffed_required == 1 or entry_level_overuse == 1:
+            penalty += 3.0
+            flags.append("Repeated required-skill keyword pattern in one experience")
+
+    if len(normalized_experiences) >= 2:
         desc_missing = 0
-        for entry in experiences[:4]:
-            if not isinstance(entry, dict):
-                desc_missing += 1
-                continue
+        for entry in normalized_experiences[:4]:
             if not str(entry.get("description") or "").strip():
                 desc_missing += 1
         listed_skill_count = len(candidate_features.get("skills", []))

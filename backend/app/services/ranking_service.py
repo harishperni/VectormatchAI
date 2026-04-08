@@ -515,6 +515,16 @@ def _experience_relevance_score(job: Job, parsed_json: dict[str, Any]) -> float:
         return 100.0
 
     preferred = [str(skill).lower() for skill in (job.nice_to_have_skills or []) if skill]
+    required_norm_pairs = [
+        (skill, normalized[0] if normalized else skill)
+        for skill in required
+        for normalized in [_normalize_skill_names([skill])]
+    ]
+    preferred_norm_pairs = [
+        (skill, normalized[0] if normalized else skill)
+        for skill in preferred
+        for normalized in [_normalize_skill_names([skill])]
+    ]
     title_keywords = [
         token
         for token in re.findall(r"[a-zA-Z][a-zA-Z0-9+.#-]{2,}", str(job.title or "").lower())
@@ -533,13 +543,11 @@ def _experience_relevance_score(job: Job, parsed_json: dict[str, Any]) -> float:
         recency_weight = _entry_recency_weight(entry.get("end_date"))
 
         entry_score = 0.0
-        for req in required:
-            req_norm = _normalize_skill_names([req])[0] if _normalize_skill_names([req]) else req
+        for req, req_norm in required_norm_pairs:
             if req in title or req in desc or any(_skills_match(req_norm, s) for s in skills_used):
                 entry_score += 1.0
 
-        for pref in preferred:
-            pref_norm = _normalize_skill_names([pref])[0] if _normalize_skill_names([pref]) else pref
+        for pref, pref_norm in preferred_norm_pairs:
             if pref in title or pref in desc or any(_skills_match(pref_norm, s) for s in skills_used):
                 entry_score += 0.4
 

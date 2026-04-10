@@ -25,7 +25,7 @@ from app.services.embedding_service import (
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 
-SCORING_VERSION = "score_v11_structured_v1_anti_cheat_guard"
+SCORING_VERSION = "score_v12_structured_v1_anti_cheat_advanced"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"
@@ -796,6 +796,80 @@ def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resu
     return -8.0 if work_mode == "inperson" else -6.0
 
 
+def _normalize_sentence_for_duplicate_check(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]", " ", value.lower())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _duplicate_experience_sentence_count(experience_entries: list[dict[str, Any]]) -> int:
+    sentence_freq: dict[str, int] = {}
+    for entry in experience_entries[:8]:
+        if not isinstance(entry, dict):
+            continue
+        desc = str(entry.get("description") or "")
+        if not desc.strip():
+            continue
+        parts = re.split(r"(?<=[.!?])\s+|[;\n]+", desc)
+        unique_local: set[str] = set()
+        for part in parts:
+            normalized = _normalize_sentence_for_duplicate_check(part)
+            if len(normalized) < 35:
+                continue
+            if normalized in unique_local:
+                continue
+            unique_local.add(normalized)
+            sentence_freq[normalized] = sentence_freq.get(normalized, 0) + 1
+    return sum(1 for count in sentence_freq.values() if count >= 2)
+
+
+def _burst_repetition_signal(text: str) -> tuple[int, str | None]:
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9+#]{1,29}", text.lower())
+    if not tokens:
+        return 0, None
+    run = 1
+    max_run = 1
+    max_token = tokens[0]
+    for idx in range(1, len(tokens)):
+        if tokens[idx] == tokens[idx - 1]:
+            run += 1
+            if run > max_run:
+                max_run = run
+                max_token = tokens[idx]
+        else:
+            run = 1
+    return max_run, max_token
+
+
+def _hidden_text_signal(text: str) -> tuple[float, list[str]]:
+    if not text:
+        return 0.0, []
+    flags: list[str] = []
+    penalty = 0.0
+
+    zero_width_chars = re.findall(r"[\u200B-\u200D\u2060\uFEFF]", text)
+    if len(zero_width_chars) >= 8:
+        penalty += 6.0
+        flags.append("Possible hidden zero-width text pattern")
+    elif len(zero_width_chars) >= 3:
+        penalty += 3.0
+        flags.append("Suspicious invisible character usage")
+
+    control_chars = re.findall(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", text)
+    text_len = max(1, len(text))
+    control_ratio = len(control_chars) / text_len
+    if control_ratio >= 0.01 and len(control_chars) >= 20:
+        penalty += 5.0
+        flags.append("High non-printable character density")
+
+    spaced_word_runs = re.findall(r"(?:\b[a-zA-Z]\s){6,}[a-zA-Z]\b", text)
+    if len(spaced_word_runs) >= 2:
+        penalty += 2.0
+        flags.append("Possible obfuscated spaced-keyword text")
+
+    return penalty, flags[:2]
+
+
 def _anti_cheat_penalty(
     job: Job,
     resume: Resume,
@@ -866,6 +940,25 @@ def _anti_cheat_penalty(
             penalty += 3.0
             flags.append("Repeated required-skill keyword pattern in one experience")
 
+    duplicate_sentences = _duplicate_experience_sentence_count(normalized_experiences)
+    if duplicate_sentences >= 4:
+        penalty += 6.0
+        flags.append("Repeated experience bullets across multiple roles")
+
+    burst_run, burst_token = _burst_repetition_signal(text)
+    if burst_run >= 8:
+        penalty += 6.0
+        if burst_token:
+            flags.append(f"Burst repetition detected for '{burst_token}'")
+    elif burst_run >= 5:
+        penalty += 3.0
+        flags.append("Consecutive keyword burst pattern detected")
+
+    hidden_penalty, hidden_flags = _hidden_text_signal(text)
+    if hidden_penalty > 0:
+        penalty += hidden_penalty
+        flags.extend(hidden_flags)
+
     if len(normalized_experiences) >= 2:
         desc_missing = 0
         for entry in normalized_experiences[:4]:
@@ -880,7 +973,8 @@ def _anti_cheat_penalty(
         penalty += 2.0
         flags.append("Many listed skills but weak required-skill evidence")
 
-    return min(15.0, round(penalty, 2)), flags[:3]
+    # Keep penalties bounded while still allowing advanced anti-cheat evidence.
+    return min(20.0, round(penalty, 2)), flags[:4]
 
 
 def _confidence_score(

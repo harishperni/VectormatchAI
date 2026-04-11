@@ -494,9 +494,10 @@ def _entry_recency_weight(end_date: object) -> float:
     end_dt = _parse_ym_date(end_date)
     if not end_dt:
         return 0.75
+    now = datetime.now(UTC)
     months_ago = max(
         0.0,
-        (datetime.now(UTC).year - end_dt.year) * 12 + (datetime.now(UTC).month - end_dt.month),
+        (now.year - end_dt.year) * 12 + (now.month - end_dt.month),
     )
     if months_ago <= 24:
         return 1.0

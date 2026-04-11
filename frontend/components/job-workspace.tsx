@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import CandidatePipelineBoard from "@/components/candidate-pipeline-board";
 import Link from "next/link";
 
+import CandidateDashboardTab from "@/components/candidate-dashboard-tab";
 import CandidateReviewWorkspace from "@/components/candidate-review-workspace";
 import InterviewTasksTab from "@/components/interview-tasks-tab";
 import ParsedResumesTable from "@/components/parsed-resumes-table";
@@ -24,7 +25,7 @@ export default function JobWorkspace({
   const [localRankings, setLocalRankings] = useState<RankingRow[]>(rankings);
   const [localResumes, setLocalResumes] = useState<ParsedResumeRow[]>(resumes);
   const [showPipeline, setShowPipeline] = useState(false);
-  const [activeTab, setActiveTab] = useState<"workspace" | "tasks" | "quality">("workspace");
+  const [activeTab, setActiveTab] = useState<"workspace" | "dashboard" | "tasks" | "quality">("workspace");
   const storageKey = `ats:job:${jobId}:showKanban`;
   const tabStorageKey = `ats:job:${jobId}:activeTab`;
   const [refreshing, setRefreshing] = useState(false);
@@ -37,7 +38,7 @@ export default function JobWorkspace({
         setShowPipeline(true);
       }
       const savedTab = window.localStorage.getItem(tabStorageKey);
-      if (savedTab === "tasks" || savedTab === "quality") {
+      if (savedTab === "dashboard" || savedTab === "tasks" || savedTab === "quality") {
         setActiveTab(savedTab);
       }
     } catch {
@@ -147,6 +148,21 @@ export default function JobWorkspace({
             </button>
             <button
               onClick={() => {
+                setActiveTab("dashboard");
+                try {
+                  window.localStorage.setItem(tabStorageKey, "dashboard");
+                } catch {
+                  // ignore storage errors
+                }
+              }}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+                activeTab === "dashboard" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+              }`}
+            >
+              Dashboard
+            </button>
+            <button
+              onClick={() => {
                 setActiveTab("tasks");
                 try {
                   window.localStorage.setItem(tabStorageKey, "tasks");
@@ -210,6 +226,8 @@ export default function JobWorkspace({
 
       {activeTab === "tasks" ? (
         <InterviewTasksTab jobId={jobId} />
+      ) : activeTab === "dashboard" ? (
+        <CandidateDashboardTab rows={localRankings} />
       ) : activeTab === "quality" ? (
         <QualityEvaluationTab jobId={jobId} />
       ) : (

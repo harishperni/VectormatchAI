@@ -1631,6 +1631,10 @@ def get_rankings_for_job(
     output: list[dict] = []
     for ranking, candidate, resume in rows:
         payload = ranking.explanation_json if isinstance(ranking.explanation_json, dict) else {}
+        score_breakdown_payload = (
+            payload.get("score_breakdown", {}) if isinstance(payload.get("score_breakdown", {}), dict) else {}
+        )
+        anti_cheat_score = _clamp_0_100(_to_float(score_breakdown_payload.get("anti_cheat_penalty")) or 0.0)
         parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
         reasons = payload.get("top_reasons", [])
         matched_skills = payload.get("matched_skills", [])
@@ -1712,9 +1716,7 @@ def get_rankings_for_job(
         audit_flags = _explainability_audit_flags(
             score=score,
             confidence=float(ranking.confidence),
-            score_breakdown=payload.get("score_breakdown", {})
-            if isinstance(payload.get("score_breakdown", {}), dict)
-            else {},
+            score_breakdown=score_breakdown_payload,
             matched_skills=matched_skills,
             missing_skills=missing_skills,
             anti_cheat_flags=payload.get("anti_cheat_flags", [])
@@ -1754,6 +1756,7 @@ def get_rankings_for_job(
                     top_reasons=reasons if isinstance(reasons, list) else [],
                     summary=payload.get("summary") if isinstance(payload.get("summary"), str) else None,
                 ),
+                "anti_cheat_score": anti_cheat_score,
             }
         )
     return output
@@ -1798,6 +1801,14 @@ def get_candidate_explanation(
         "matched_skills": payload.get("matched_skills", []),
         "missing_skills": payload.get("missing_skills", []),
         "anti_cheat_flags": payload.get("anti_cheat_flags", []),
+        "anti_cheat_score": _clamp_0_100(
+            _to_float(
+                payload.get("score_breakdown", {}).get("anti_cheat_penalty")
+                if isinstance(payload.get("score_breakdown"), dict)
+                else 0.0
+            )
+            or 0.0
+        ),
         "evidence_snippets": payload.get("evidence_snippets", []),
         "summary": payload.get("summary", "No explanation available."),
         "model_version": model_version,

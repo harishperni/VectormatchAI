@@ -22,6 +22,11 @@ function stageLabel(action?: string | null): string {
   return "New/Review";
 }
 
+function isAntiCheatFlagged(row: RankingRow): boolean {
+  const score = Number(row.anti_cheat_score ?? 0);
+  return Number.isFinite(score) && score > 10;
+}
+
 export default function CandidateDashboardTab({ rows }: Props) {
   const summary = useMemo(() => {
     const total = rows.length;
@@ -48,7 +53,7 @@ export default function CandidateDashboardTab({ rows }: Props) {
 
     let scoreSum = 0;
     let confidenceSum = 0;
-    let riskFlags = 0;
+    let antiCheatFlags = 0;
 
     for (const row of rows) {
       const stage = stageLabel(row.action_status);
@@ -73,8 +78,8 @@ export default function CandidateDashboardTab({ rows }: Props) {
       const degree = (row.highest_degree || "Unknown").trim() || "Unknown";
       degreeCounts[degree] = (degreeCounts[degree] || 0) + 1;
 
-      if ((row.audit_flags || []).length > 0) {
-        riskFlags += 1;
+      if (isAntiCheatFlagged(row)) {
+        antiCheatFlags += 1;
       }
     }
 
@@ -89,7 +94,7 @@ export default function CandidateDashboardTab({ rows }: Props) {
       total,
       avgScore,
       avgConfidence,
-      riskFlags,
+      antiCheatFlags,
       stageCounts,
       scoreBands,
       experienceBands,
@@ -120,9 +125,9 @@ export default function CandidateDashboardTab({ rows }: Props) {
           <p className="mt-1 text-2xl font-semibold text-slate-900">{summary.avgConfidence}</p>
         </article>
         <article className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Flagged Profiles</p>
-          <p className="mt-1 text-2xl font-semibold text-slate-900">{summary.riskFlags}</p>
-          <p className="text-xs text-slate-600">{pct(summary.riskFlags, total)} of current pool</p>
+          <p className="text-xs uppercase tracking-wide text-slate-500">Anti-Cheat Flagged</p>
+          <p className="mt-1 text-2xl font-semibold text-slate-900">{summary.antiCheatFlags}</p>
+          <p className="text-xs text-slate-600">{pct(summary.antiCheatFlags, total)} of current pool</p>
         </article>
       </div>
 

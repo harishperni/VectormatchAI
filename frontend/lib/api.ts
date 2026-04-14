@@ -31,6 +31,7 @@ export type RankingRow = {
   audit_flags?: string[];
   audit_summary?: string | null;
   audit_detail?: string[];
+  anti_cheat_score?: number;
 };
 
 export type EvaluationDiffRow = {
@@ -120,6 +121,8 @@ export type CandidateExplanation = {
   confidence_reasoning?: string | null;
   strengths?: string[];
   top_reasons?: string[];
+  anti_cheat_score?: number;
+  anti_cheat_flags?: string[];
 };
 
 export type InterviewTask = {

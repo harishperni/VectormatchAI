@@ -46,9 +46,15 @@ function scoreBadgeClass(score?: number | null): string {
   return "border-rose-200 bg-rose-50 text-rose-700";
 }
 
+function isAntiCheatFlagged(row: RankingRow): boolean {
+  const score = Number(row.anti_cheat_score ?? 0);
+  return Number.isFinite(score) && score > 10;
+}
+
 export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props) {
   const [actionMessage, setActionMessage] = useState("Ready");
   const [page, setPage] = useState(1);
+  const [showUnflaggedOnly, setShowUnflaggedOnly] = useState(true);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [selectedResumeId, setSelectedResumeId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -56,19 +62,24 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [explanation, setExplanation] = useState<CandidateExplanation | null>(null);
 
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const visibleRows = useMemo(
+    () => (showUnflaggedOnly ? rows.filter((row) => !isAntiCheatFlagged(row)) : rows),
+    [rows, showUnflaggedOnly]
+  );
+
+  const totalPages = Math.max(1, Math.ceil(visibleRows.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
 
   const pagedRows = useMemo(() => {
     const start = (currentPage - 1) * PAGE_SIZE;
-    return rows.slice(start, start + PAGE_SIZE);
-  }, [rows, currentPage]);
+    return visibleRows.slice(start, start + PAGE_SIZE);
+  }, [visibleRows, currentPage]);
 
   const selectedRow = useMemo(
-    () => rows.find((row) => row.candidate_id === selectedCandidateId && row.resume_id === selectedResumeId) ??
-      rows.find((row) => row.candidate_id === selectedCandidateId) ??
+    () => visibleRows.find((row) => row.candidate_id === selectedCandidateId && row.resume_id === selectedResumeId) ??
+      visibleRows.find((row) => row.candidate_id === selectedCandidateId) ??
       null,
-    [rows, selectedCandidateId, selectedResumeId]
+    [visibleRows, selectedCandidateId, selectedResumeId]
   );
 
   const selectedResume = useMemo(
@@ -163,7 +174,7 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
     setDrawerError(null);
   }
 
-  if (rows.length === 0) {
+  if (visibleRows.length === 0) {
     return (
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="font-heading text-xl font-semibold">Applicants</h2>
@@ -182,7 +193,7 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
           <div>
             <h2 className="font-heading text-xl font-semibold text-slate-900">Applicants</h2>
             <p className="text-xs text-slate-500">
-              Showing {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, rows.length)} of {rows.length}
+              Showing {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, visibleRows.length)} of {visibleRows.length}
             </p>
           </div>
           <p className="text-xs text-slate-500">{selectedIds.length} selected</p>
@@ -206,6 +217,18 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
             >
               Bulk Recommend Other Jobs
             </button>
+            <label className="ml-2 inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-700">
+              <input
+                type="checkbox"
+                checked={showUnflaggedOnly}
+                onChange={(event) => {
+                  setPage(1);
+                  setShowUnflaggedOnly(event.target.checked);
+                }}
+                aria-label="Show unflagged only"
+              />
+              Unflagged only (anti-fraud ≤ 10)
+            </label>
           </div>
           <p className="text-xs text-slate-500">{actionMessage}</p>
         </div>
@@ -282,6 +305,9 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                       <div className="max-w-[340px] space-y-1">
                         <p className="font-medium text-slate-800">
                           {row.audit_summary ?? (row.audit_flags?.length ? row.audit_flags[0] : "OK")}
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          Anti-fraud score: {Number(row.anti_cheat_score ?? 0).toFixed(1)}
                         </p>
                         {row.audit_detail?.length ? (
                           <p className="line-clamp-3 text-[11px] leading-4 text-slate-500">
@@ -480,6 +506,9 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Explainability Audit</p>
                 <p className="mt-2 text-sm text-slate-700">
                   {selectedRow?.audit_flags?.length ? selectedRow.audit_flags.join(" | ") : "No risk flags"}
+                </p>
+                <p className="mt-2 text-sm text-slate-700">
+                  Anti-fraud score: {Number(explanation?.anti_cheat_score ?? selectedRow?.anti_cheat_score ?? 0).toFixed(1)}
                 </p>
               </article>
             </div>

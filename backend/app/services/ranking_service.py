@@ -946,7 +946,7 @@ def _anti_cheat_penalty(
     normalized_experiences = [entry for entry in experiences if isinstance(entry, dict)] if isinstance(experiences, list) else []
     if required:
         stuffed_required = 0
-        entry_level_overuse = 0
+        experiences_with_overuse: set[int] = set()
         experience_count = max(0, len(normalized_experiences))
         allowed_total_occurrences = (experience_count * 5) + 5
 
@@ -955,34 +955,35 @@ def _anti_cheat_penalty(
             if req_count_total > allowed_total_occurrences:
                 stuffed_required += 1
 
-            for entry in normalized_experiences[:6]:
+            for idx, entry in enumerate(normalized_experiences[:6]):
                 title = str(entry.get("title") or "").lower()
                 desc = str(entry.get("description") or "").lower()
                 skills_used = " ".join(str(s).lower() for s in (entry.get("skills_used") or []) if s)
                 entry_text = f"{title} {desc} {skills_used}"
                 req_count_entry = len(re.findall(rf"\b{re.escape(req)}\b", entry_text))
-                if req_count_entry > 5:
-                    entry_level_overuse += 1
-                    break
+                if req_count_entry > 7:
+                    experiences_with_overuse.add(idx)
 
-        if stuffed_required >= 2 or entry_level_overuse >= 2:
+        overused_experience_count = len(experiences_with_overuse)
+
+        if stuffed_required >= 2 or overused_experience_count >= 2:
             penalty += 6.0
             flags.append("Possible required-skill keyword stuffing across experience history")
             breakdown.append(
                 {
                     "rule": "required_skill_stuffing",
                     "points": 6.0,
-                    "evidence": f"{stuffed_required} required skills exceed allowed total and {entry_level_overuse} exceed per-experience cap",
+                    "evidence": f"{stuffed_required} required skills exceed allowed total and {overused_experience_count} experiences exceed per-experience cap",
                 }
             )
-        elif stuffed_required == 1 or entry_level_overuse == 1:
+        elif stuffed_required == 1:
             penalty += 3.0
-            flags.append("Repeated required-skill keyword pattern in one experience")
+            flags.append("Repeated required-skill keyword pattern in total resume text")
             breakdown.append(
                 {
                     "rule": "required_skill_repetition",
                     "points": 3.0,
-                    "evidence": f"{stuffed_required} required skill exceeded total cap or {entry_level_overuse} exceeded per-experience cap",
+                    "evidence": "1 required skill exceeded total cap across resume text",
                 }
             )
 

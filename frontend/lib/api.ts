@@ -123,6 +123,11 @@ export type CandidateExplanation = {
   top_reasons?: string[];
   anti_cheat_score?: number;
   anti_cheat_flags?: string[];
+  anti_cheat_breakdown?: Array<{
+    rule?: string;
+    points?: number;
+    evidence?: string;
+  }>;
 };
 
 export type InterviewTask = {

@@ -25,7 +25,7 @@ from app.services.embedding_service import (
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 
-SCORING_VERSION = "score_v12_structured_v1_anti_cheat_advanced"
+SCORING_VERSION = "score_v13_structured_v1_anti_cheat_breakdown"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"
@@ -82,6 +82,7 @@ class RankingComputation:
     distance_priority_bonus: float
     anti_cheat_penalty: float
     anti_cheat_flags: list[str]
+    anti_cheat_breakdown: list[dict[str, Any]]
     final: float
     confidence: float
     matched_skills: list[str]
@@ -876,14 +877,22 @@ def _anti_cheat_penalty(
     resume: Resume,
     candidate_features: dict[str, Any],
     matched_skills: list[str],
-) -> tuple[float, list[str]]:
+) -> tuple[float, list[str], list[dict[str, Any]]]:
     text = str(candidate_features.get("raw_text") or resume.raw_text or "")
     lowered = text.lower()
     if not lowered.strip():
-        return 0.0, []
+        return 0.0, [], []
 
     flags: list[str] = []
+    breakdown: list[dict[str, Any]] = []
     penalty = 0.0
+
+    required = _normalize_skill_names([str(skill) for skill in (job.required_skills or []) if skill])
+    required_set = {item.lower() for item in required}
+    common_stopwords = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is",
+        "it", "of", "on", "or", "that", "the", "to", "was", "were", "with",
+    }
 
     tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9+#]{1,29}", lowered)
     token_count = len(tokens)
@@ -891,6 +900,8 @@ def _anti_cheat_penalty(
         freq: dict[str, int] = {}
         for token in tokens:
             if len(token) < 3:
+                continue
+            if token in common_stopwords and token not in required_set:
                 continue
             freq[token] = freq.get(token, 0) + 1
 
@@ -900,16 +911,36 @@ def _anti_cheat_penalty(
             if top_ratio >= 0.06 and top_count >= 20:
                 penalty += 8.0
                 flags.append(f"Unusual repetition of '{top_token}'")
+                breakdown.append(
+                    {
+                        "rule": "unusual_token_repetition",
+                        "points": 8.0,
+                        "evidence": f"'{top_token}' repeated {top_count} times ({round(top_ratio * 100, 2)}% of tokens)",
+                    }
+                )
             elif top_ratio >= 0.04 and top_count >= 16:
                 penalty += 5.0
                 flags.append("High repeated keyword density detected")
+                breakdown.append(
+                    {
+                        "rule": "high_keyword_density",
+                        "points": 5.0,
+                        "evidence": f"Top token '{top_token}' repeated {top_count} times ({round(top_ratio * 100, 2)}% of tokens)",
+                    }
+                )
 
             unique_ratio = len(freq) / max(1, token_count)
             if unique_ratio <= 0.22:
                 penalty += 3.0
                 flags.append("Low lexical diversity in resume text")
+                breakdown.append(
+                    {
+                        "rule": "low_lexical_diversity",
+                        "points": 3.0,
+                        "evidence": f"Unique token ratio is {round(unique_ratio, 3)}",
+                    }
+                )
 
-    required = _normalize_skill_names([str(skill) for skill in (job.required_skills or []) if skill])
     parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
     experiences = parsed_json.get("experience_entries", [])
     normalized_experiences = [entry for entry in experiences if isinstance(entry, dict)] if isinstance(experiences, list) else []
@@ -937,28 +968,70 @@ def _anti_cheat_penalty(
         if stuffed_required >= 2 or entry_level_overuse >= 2:
             penalty += 6.0
             flags.append("Possible required-skill keyword stuffing across experience history")
+            breakdown.append(
+                {
+                    "rule": "required_skill_stuffing",
+                    "points": 6.0,
+                    "evidence": f"{stuffed_required} required skills exceed allowed total and {entry_level_overuse} exceed per-experience cap",
+                }
+            )
         elif stuffed_required == 1 or entry_level_overuse == 1:
             penalty += 3.0
             flags.append("Repeated required-skill keyword pattern in one experience")
+            breakdown.append(
+                {
+                    "rule": "required_skill_repetition",
+                    "points": 3.0,
+                    "evidence": f"{stuffed_required} required skill exceeded total cap or {entry_level_overuse} exceeded per-experience cap",
+                }
+            )
 
     duplicate_sentences = _duplicate_experience_sentence_count(normalized_experiences)
     if duplicate_sentences >= 4:
         penalty += 6.0
         flags.append("Repeated experience bullets across multiple roles")
+        breakdown.append(
+            {
+                "rule": "duplicate_experience_bullets",
+                "points": 6.0,
+                "evidence": f"{duplicate_sentences} duplicated long sentences across experiences",
+            }
+        )
 
     burst_run, burst_token = _burst_repetition_signal(text)
     if burst_run >= 8:
         penalty += 6.0
         if burst_token:
             flags.append(f"Burst repetition detected for '{burst_token}'")
+        breakdown.append(
+            {
+                "rule": "burst_repetition",
+                "points": 6.0,
+                "evidence": f"Max consecutive repetition run: {burst_run}",
+            }
+        )
     elif burst_run >= 5:
         penalty += 3.0
         flags.append("Consecutive keyword burst pattern detected")
+        breakdown.append(
+            {
+                "rule": "burst_repetition",
+                "points": 3.0,
+                "evidence": f"Max consecutive repetition run: {burst_run}",
+            }
+        )
 
     hidden_penalty, hidden_flags = _hidden_text_signal(text)
     if hidden_penalty > 0:
         penalty += hidden_penalty
         flags.extend(hidden_flags)
+        breakdown.append(
+            {
+                "rule": "hidden_or_obfuscated_text",
+                "points": round(hidden_penalty, 2),
+                "evidence": " | ".join(hidden_flags[:2]) if hidden_flags else "Suspicious hidden text signal",
+            }
+        )
 
     if len(normalized_experiences) >= 2:
         desc_missing = 0
@@ -969,13 +1042,27 @@ def _anti_cheat_penalty(
         if listed_skill_count >= 35 and desc_missing >= 3:
             penalty += 4.0
             flags.append("Large skill list with weak supporting experience detail")
+            breakdown.append(
+                {
+                    "rule": "skill_list_without_support",
+                    "points": 4.0,
+                    "evidence": f"{listed_skill_count} listed skills with {desc_missing} thin experience entries",
+                }
+            )
 
     if not matched_skills and len(required) >= 3 and len(candidate_features.get("skills", [])) >= 25:
         penalty += 2.0
         flags.append("Many listed skills but weak required-skill evidence")
+        breakdown.append(
+            {
+                "rule": "weak_required_skill_evidence",
+                "points": 2.0,
+                "evidence": "No required-skill matches despite large skills inventory",
+            }
+        )
 
     # Keep penalties bounded while still allowing advanced anti-cheat evidence.
-    return min(20.0, round(penalty, 2)), flags[:4]
+    return min(20.0, round(penalty, 2)), flags[:4], breakdown[:8]
 
 
 def _confidence_score(
@@ -1107,7 +1194,7 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
     soft_skill = _soft_skill_score(job, candidate)
     managerial_skill = _managerial_skill_score(job, candidate, parsed_json)
     distance_bonus = _distance_priority_bonus(job, parsed_json, resume)
-    anti_cheat_penalty, anti_cheat_flags = _anti_cheat_penalty(
+    anti_cheat_penalty, anti_cheat_flags, anti_cheat_breakdown = _anti_cheat_penalty(
         job,
         resume,
         candidate,
@@ -1170,6 +1257,7 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         distance_priority_bonus=distance_bonus,
         anti_cheat_penalty=anti_cheat_penalty,
         anti_cheat_flags=anti_cheat_flags,
+        anti_cheat_breakdown=anti_cheat_breakdown,
         final=final,
         confidence=confidence,
         matched_skills=matched_skills,
@@ -1369,6 +1457,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             "matched_skills": result.matched_skills,
             "missing_skills": result.missing_skills,
             "anti_cheat_flags": result.anti_cheat_flags,
+            "anti_cheat_breakdown": result.anti_cheat_breakdown,
             "evidence_snippets": evidence_snippets,
             "summary": " | ".join(result.reasons),
             "top_reasons": result.reasons,
@@ -1801,6 +1890,7 @@ def get_candidate_explanation(
         "matched_skills": payload.get("matched_skills", []),
         "missing_skills": payload.get("missing_skills", []),
         "anti_cheat_flags": payload.get("anti_cheat_flags", []),
+        "anti_cheat_breakdown": payload.get("anti_cheat_breakdown", []),
         "anti_cheat_score": _clamp_0_100(
             _to_float(
                 payload.get("score_breakdown", {}).get("anti_cheat_penalty")

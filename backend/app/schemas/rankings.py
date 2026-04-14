@@ -51,6 +51,7 @@ class ExplanationResponse(BaseModel):
     top_reasons: list[str] = Field(default_factory=list)
     anti_cheat_score: float = 0.0
     anti_cheat_flags: list[str] = Field(default_factory=list)
+    anti_cheat_breakdown: list[dict[str, object]] = Field(default_factory=list)
 
 
 class CandidateActionRequest(BaseModel):

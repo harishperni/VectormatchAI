@@ -510,6 +510,21 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                 <p className="mt-2 text-sm text-slate-700">
                   Anti-fraud score: {Number(explanation?.anti_cheat_score ?? selectedRow?.anti_cheat_score ?? 0).toFixed(1)}
                 </p>
+                {explanation?.anti_cheat_breakdown?.length ? (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Anti-Fraud Score Breakdown
+                    </p>
+                    {explanation.anti_cheat_breakdown.map((item, idx) => (
+                      <div key={`anti-cheat-breakdown-${idx}`} className="rounded border border-slate-200 bg-slate-50 p-2">
+                        <p className="text-sm font-semibold text-slate-800">
+                          +{Number(item.points ?? 0).toFixed(1)} {item.rule ?? "rule"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">{item.evidence ?? "No evidence text"}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </article>
             </div>
           </aside>

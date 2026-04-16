@@ -25,7 +25,7 @@ from app.services.embedding_service import (
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 
-SCORING_VERSION = "score_v14_structured_v1_behavioral_weighted"
+SCORING_VERSION = "score_v15_structured_v1_behavioral_job_hopper"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"
@@ -80,6 +80,8 @@ class RankingComputation:
     soft_skill: float
     managerial_skill: float
     distance_priority_bonus: float
+    job_hopper_penalty: float
+    job_hopper_flags: list[str]
     anti_cheat_penalty: float
     anti_cheat_flags: list[str]
     anti_cheat_breakdown: list[dict[str, Any]]
@@ -822,6 +824,75 @@ def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resu
     return -8.0 if work_mode == "inperson" else -6.0
 
 
+def _months_between(start_dt: datetime, end_dt: datetime) -> float:
+    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+    if end_dt.day >= start_dt.day:
+        months += 0.5
+    return max(0.0, months)
+
+
+def _job_hopper_penalty(parsed_json: dict[str, Any], resume: Resume) -> tuple[float, list[str]]:
+    entries = parsed_json.get("experience_entries", [])
+    if not isinstance(entries, list) or len(entries) < 2:
+        return 0.0, []
+
+    tenures: list[float] = []
+    short_stints = 0
+    starts: list[datetime] = []
+    ends: list[datetime] = []
+
+    for entry in entries[:8]:
+        if not isinstance(entry, dict):
+            continue
+        start_dt = _parse_ym_date(entry.get("start_date"))
+        end_dt = _parse_ym_date(entry.get("end_date"))
+        if not start_dt or not end_dt:
+            continue
+        if end_dt < start_dt:
+            continue
+
+        tenure_months = _months_between(start_dt, end_dt)
+        if tenure_months <= 0:
+            continue
+        tenures.append(tenure_months)
+        starts.append(start_dt)
+        ends.append(end_dt)
+
+        is_current = bool(entry.get("is_current"))
+        if tenure_months < 12 and not is_current:
+            short_stints += 1
+
+    if len(tenures) < 2:
+        return 0.0, []
+
+    avg_tenure = sum(tenures) / len(tenures)
+    total_window_months = _months_between(min(starts), max(ends))
+    roles_per_year = (len(tenures) * 12.0 / total_window_months) if total_window_months > 0 else 0.0
+
+    penalty = 0.0
+    flags: list[str] = []
+
+    if avg_tenure < 14 and short_stints >= 2:
+        penalty += 6.0
+        flags.append("Frequent short role tenures across work history")
+    elif avg_tenure < 18 and short_stints >= 2:
+        penalty += 4.0
+        flags.append("Pattern of short tenures in multiple roles")
+    elif avg_tenure < 22 and short_stints >= 3:
+        penalty += 2.0
+        flags.append("Several short role durations detected")
+
+    if roles_per_year > 1.2 and len(tenures) >= 3:
+        penalty += 2.0
+        flags.append("High role-switch frequency over recent years")
+
+    total_exp_years = float(resume.experience_years) if resume.experience_years is not None else None
+    if total_exp_years is not None and total_exp_years < 4.0:
+        penalty *= 0.5
+
+    return _clamp_0_100(penalty), flags[:2]
+
+
 def _normalize_sentence_for_duplicate_check(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9\s]", " ", value.lower())
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -1149,11 +1220,13 @@ def _explainability_audit_flags(
     matched_skills: list[str],
     missing_skills: list[str],
     anti_cheat_flags: list[str] | None = None,
+    job_hopper_flags: list[str] | None = None,
 ) -> list[str]:
     flags: list[str] = []
     semantic = float(score_breakdown.get("semantic", 0.0))
     experience = float(score_breakdown.get("experience", 0.0))
     anti_cheat_penalty = float(score_breakdown.get("anti_cheat_penalty", 0.0))
+    job_hopper_penalty = float(score_breakdown.get("job_hopper_penalty", 0.0))
 
     if score >= 80 and len(missing_skills) >= 2:
         flags.append("High score despite multiple missing skills")
@@ -1165,8 +1238,12 @@ def _explainability_audit_flags(
         flags.append("Strong rank even though experience signal is weak")
     if anti_cheat_penalty >= 6:
         flags.append("Potential ATS-gaming pattern detected")
+    if job_hopper_penalty >= 4:
+        flags.append("Job-hopper risk pattern detected")
     if anti_cheat_flags:
         flags.extend(str(item) for item in anti_cheat_flags[:2] if str(item).strip())
+    if job_hopper_flags:
+        flags.extend(str(item) for item in job_hopper_flags[:2] if str(item).strip())
     return flags
 
 
@@ -1219,6 +1296,7 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
     soft_skill = _soft_skill_score(job, candidate)
     managerial_skill = _managerial_skill_score(job, candidate, parsed_json)
     distance_bonus = _distance_priority_bonus(job, parsed_json, resume)
+    job_hopper_penalty, job_hopper_flags = _job_hopper_penalty(parsed_json, resume)
     anti_cheat_penalty, anti_cheat_flags, anti_cheat_breakdown = _anti_cheat_penalty(
         job,
         resume,
@@ -1235,6 +1313,7 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         (managerial_skill * MANAGERIAL_SKILL_WEIGHT)
     )
     final = _clamp_0_100(final + distance_bonus)
+    final = _clamp_0_100(final - job_hopper_penalty)
     final = _clamp_0_100(final - anti_cheat_penalty)
 
     confidence = _confidence_score(
@@ -1266,6 +1345,8 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         reasons.append("Strong location proximity for role mode")
     elif distance_bonus <= -8:
         reasons.append("Distance may impact on-site/hybrid suitability")
+    if job_hopper_penalty >= 4:
+        reasons.append("Frequent short job tenures may indicate retention risk")
     if anti_cheat_penalty >= 6:
         reasons.append("Ranking adjusted due to suspicious keyword stuffing patterns")
 
@@ -1280,6 +1361,8 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
         soft_skill=soft_skill,
         managerial_skill=managerial_skill,
         distance_priority_bonus=distance_bonus,
+        job_hopper_penalty=job_hopper_penalty,
+        job_hopper_flags=job_hopper_flags,
         anti_cheat_penalty=anti_cheat_penalty,
         anti_cheat_flags=anti_cheat_flags,
         anti_cheat_breakdown=anti_cheat_breakdown,
@@ -1473,6 +1556,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "soft_skill": result.soft_skill,
                 "managerial_skill": result.managerial_skill,
                 "distance_priority_bonus": result.distance_priority_bonus,
+                "job_hopper_penalty": result.job_hopper_penalty,
                 "anti_cheat_penalty": result.anti_cheat_penalty,
             },
             "semantic_source": semantic_source,
@@ -1481,6 +1565,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             "base_confidence": result.confidence,
             "matched_skills": result.matched_skills,
             "missing_skills": result.missing_skills,
+            "job_hopper_flags": result.job_hopper_flags,
             "anti_cheat_flags": result.anti_cheat_flags,
             "anti_cheat_breakdown": result.anti_cheat_breakdown,
             "evidence_snippets": evidence_snippets,
@@ -1534,6 +1619,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                 "soft_skill": result.soft_skill,
                 "managerial_skill": result.managerial_skill,
                 "distance_priority_bonus": result.distance_priority_bonus,
+                "job_hopper_penalty": result.job_hopper_penalty,
                 "anti_cheat_penalty": result.anti_cheat_penalty,
             }
 
@@ -1749,6 +1835,7 @@ def get_rankings_for_job(
             payload.get("score_breakdown", {}) if isinstance(payload.get("score_breakdown", {}), dict) else {}
         )
         anti_cheat_score = _clamp_0_100(_to_float(score_breakdown_payload.get("anti_cheat_penalty")) or 0.0)
+        job_hopper_score = _clamp_0_100(_to_float(score_breakdown_payload.get("job_hopper_penalty")) or 0.0)
         parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
         reasons = payload.get("top_reasons", [])
         matched_skills = payload.get("matched_skills", [])
@@ -1836,6 +1923,9 @@ def get_rankings_for_job(
             anti_cheat_flags=payload.get("anti_cheat_flags", [])
             if isinstance(payload.get("anti_cheat_flags", []), list)
             else [],
+            job_hopper_flags=payload.get("job_hopper_flags", [])
+            if isinstance(payload.get("job_hopper_flags", []), list)
+            else [],
         )
         output.append(
             {
@@ -1870,6 +1960,10 @@ def get_rankings_for_job(
                     top_reasons=reasons if isinstance(reasons, list) else [],
                     summary=payload.get("summary") if isinstance(payload.get("summary"), str) else None,
                 ),
+                "job_hopper_score": job_hopper_score,
+                "job_hopper_flags": payload.get("job_hopper_flags", [])
+                if isinstance(payload.get("job_hopper_flags", []), list)
+                else [],
                 "anti_cheat_score": anti_cheat_score,
             }
         )
@@ -1914,7 +2008,16 @@ def get_candidate_explanation(
         "rubric_scores": payload.get("rubric_scores", {}),
         "matched_skills": payload.get("matched_skills", []),
         "missing_skills": payload.get("missing_skills", []),
+        "job_hopper_flags": payload.get("job_hopper_flags", []),
         "anti_cheat_flags": payload.get("anti_cheat_flags", []),
+        "job_hopper_score": _clamp_0_100(
+            _to_float(
+                payload.get("score_breakdown", {}).get("job_hopper_penalty")
+                if isinstance(payload.get("score_breakdown"), dict)
+                else 0.0
+            )
+            or 0.0
+        ),
         "anti_cheat_breakdown": payload.get("anti_cheat_breakdown", []),
         "anti_cheat_score": _clamp_0_100(
             _to_float(

@@ -21,6 +21,8 @@ class RankingRow(BaseModel):
     audit_flags: list[str] = Field(default_factory=list)
     audit_summary: str | None = None
     audit_detail: list[str] = Field(default_factory=list)
+    job_hopper_score: float = 0.0
+    job_hopper_flags: list[str] = Field(default_factory=list)
     anti_cheat_score: float = 0.0
 
 
@@ -49,6 +51,8 @@ class ExplanationResponse(BaseModel):
     confidence_reasoning: str | None = None
     strengths: list[str] = Field(default_factory=list)
     top_reasons: list[str] = Field(default_factory=list)
+    job_hopper_score: float = 0.0
+    job_hopper_flags: list[str] = Field(default_factory=list)
     anti_cheat_score: float = 0.0
     anti_cheat_flags: list[str] = Field(default_factory=list)
     anti_cheat_breakdown: list[dict[str, object]] = Field(default_factory=list)

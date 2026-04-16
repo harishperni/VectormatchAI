@@ -25,7 +25,7 @@ from app.services.embedding_service import (
 from app.services.llm_reasoning_service import OPENAI_REASONING_MODEL, generate_candidate_reasoning
 from app.services.location_service import distance_miles_between
 
-SCORING_VERSION = "score_v13_structured_v1_anti_cheat_breakdown"
+SCORING_VERSION = "score_v14_structured_v1_behavioral_weighted"
 MODEL_VERSION = EMBEDDING_MODEL
 LLM_TOP_K = int(os.getenv("LLM_TOP_K", "1000"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "true").lower() == "true"
@@ -642,7 +642,20 @@ MANAGERIAL_KEYWORDS: set[str] = {
     "resource planning",
     "program management",
     "project management",
+    "people leadership",
+    "team management",
+    "stakeholder alignment",
+    "conflict resolution",
+    "decision making",
 }
+
+# Final score weights (sum to 1.0) with increased emphasis on non-technical fit.
+SEMANTIC_WEIGHT = 0.12
+SKILL_WEIGHT = 0.28
+EXPERIENCE_WEIGHT = 0.24
+DOMAIN_WEIGHT = 0.16
+SOFT_SKILL_WEIGHT = 0.10
+MANAGERIAL_SKILL_WEIGHT = 0.10
 
 
 def _build_job_requirement_text(job: Job) -> str:
@@ -689,20 +702,25 @@ def _soft_skill_score(job: Job, candidate_features: dict[str, Any]) -> float:
     ]
 
     if not expected_groups:
-        baseline_hits = sum(
-            1
-            for terms in SOFT_SKILL_KEYWORDS.values()
-            if _keyword_hit_count(candidate_text, terms) > 0
-        )
-        return _clamp_0_100(50.0 + (baseline_hits * 10.0))
+        baseline_hits = 0
+        baseline_depth = 0
+        for terms in SOFT_SKILL_KEYWORDS.values():
+            group_hits = _keyword_hit_count(candidate_text, terms)
+            if group_hits > 0:
+                baseline_hits += 1
+                baseline_depth += min(6, (group_hits - 1) * 2)
+        return _clamp_0_100(45.0 + (baseline_hits * 8.0) + baseline_depth)
 
-    matched_groups = sum(
-        1
-        for group in expected_groups
-        if _keyword_hit_count(candidate_text, SOFT_SKILL_KEYWORDS[group]) > 0
-    )
+    matched_groups = 0
+    depth_bonus = 0.0
+    for group in expected_groups:
+        group_hits = _keyword_hit_count(candidate_text, SOFT_SKILL_KEYWORDS[group])
+        if group_hits > 0:
+            matched_groups += 1
+            depth_bonus += min(8.0, (group_hits - 1) * 2.0)
+
     ratio = matched_groups / max(1, len(expected_groups))
-    score = (ratio * 100.0)
+    score = (ratio * 90.0) + depth_bonus
 
     missing = len(expected_groups) - matched_groups
     if missing > 0:
@@ -722,13 +740,19 @@ def _managerial_skill_score(job: Job, candidate_features: dict[str, Any], parsed
     )
 
     managerial_hits = _keyword_hit_count(candidate_text, MANAGERIAL_KEYWORDS)
+    team_scope_hits = len(
+        re.findall(
+            r"\b(?:led|managed|mentored|supervised|owned)\s+(?:a\s+)?(?:team\s+of\s+)?\d{1,3}\b",
+            candidate_text,
+        )
+    )
     title_hits = sum(
         1
         for title in candidate_features.get("titles", [])[:6]
         if any(tag in str(title).lower() for tag in {"lead", "manager", "head", "director"})
     )
 
-    base = min(100.0, (managerial_hits * 10.0) + (title_hits * 20.0))
+    base = min(100.0, (managerial_hits * 9.0) + (title_hits * 18.0) + (team_scope_hits * 8.0))
     if not expects_managerial:
         return _clamp_0_100(max(60.0, base))
 
@@ -1203,12 +1227,12 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
     )
 
     final = _clamp_0_100(
-        (semantic * 0.14) +
-        (skill * 0.32) +
-        (experience * 0.27) +
-        (domain * 0.17) +
-        (soft_skill * 0.05) +
-        (managerial_skill * 0.05)
+        (semantic * SEMANTIC_WEIGHT) +
+        (skill * SKILL_WEIGHT) +
+        (experience * EXPERIENCE_WEIGHT) +
+        (domain * DOMAIN_WEIGHT) +
+        (soft_skill * SOFT_SKILL_WEIGHT) +
+        (managerial_skill * MANAGERIAL_SKILL_WEIGHT)
     )
     final = _clamp_0_100(final + distance_bonus)
     final = _clamp_0_100(final - anti_cheat_penalty)

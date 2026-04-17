@@ -831,6 +831,29 @@ def _months_between(start_dt: datetime, end_dt: datetime) -> float:
     return max(0.0, months)
 
 
+def _is_short_term_role(entry: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(part or "").lower()
+        for part in [
+            entry.get("title"),
+            entry.get("employment_type"),
+            entry.get("description"),
+            entry.get("company"),
+        ]
+    )
+    markers = {
+        "intern",
+        "internship",
+        "contract",
+        "contractor",
+        "freelance",
+        "temp",
+        "temporary",
+        "consultant",
+    }
+    return any(marker in text for marker in markers)
+
+
 def _job_hopper_penalty(parsed_json: dict[str, Any], resume: Resume) -> tuple[float, list[str]]:
     entries = parsed_json.get("experience_entries", [])
     if not isinstance(entries, list) or len(entries) < 2:
@@ -854,12 +877,14 @@ def _job_hopper_penalty(parsed_json: dict[str, Any], resume: Resume) -> tuple[fl
         tenure_months = _months_between(start_dt, end_dt)
         if tenure_months <= 0:
             continue
-        tenures.append(tenure_months)
-        starts.append(start_dt)
-        ends.append(end_dt)
+        short_term_role = _is_short_term_role(entry)
+        if not short_term_role:
+            tenures.append(tenure_months)
+            starts.append(start_dt)
+            ends.append(end_dt)
 
         is_current = bool(entry.get("is_current"))
-        if tenure_months < 12 and not is_current:
+        if tenure_months < 12 and not is_current and not short_term_role:
             short_stints += 1
 
     if len(tenures) < 2:

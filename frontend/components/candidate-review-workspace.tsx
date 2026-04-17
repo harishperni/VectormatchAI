@@ -11,6 +11,47 @@ type Props = {
 };
 
 const PAGE_SIZE = 10;
+const SCORE_BREAKDOWN_ORDER = [
+  "semantic",
+  "skill",
+  "experience",
+  "domain",
+  "soft_skill",
+  "managerial_skill",
+  "distance_priority_bonus",
+  "job_hopper_penalty",
+  "anti_cheat_penalty",
+] as const;
+
+const SCORE_BREAKDOWN_LABELS: Record<string, string> = {
+  semantic: "Semantic",
+  skill: "Skill",
+  experience: "Experience",
+  domain: "Domain",
+  soft_skill: "Soft Skill",
+  managerial_skill: "Managerial Skill",
+  distance_priority_bonus: "Distance Priority Bonus",
+  job_hopper_penalty: "Job Hopper Penalty",
+  anti_cheat_penalty: "Anti-Cheat Penalty",
+};
+
+function toBreakdownLabel(key: string): string {
+  if (SCORE_BREAKDOWN_LABELS[key]) return SCORE_BREAKDOWN_LABELS[key];
+  return key
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function scoreBreakdownEntries(scoreBreakdown: Record<string, number> | undefined): Array<[string, number]> {
+  if (!scoreBreakdown) return [];
+
+  const remaining = Object.keys(scoreBreakdown).filter((key) => !SCORE_BREAKDOWN_ORDER.includes(key as (typeof SCORE_BREAKDOWN_ORDER)[number]));
+  const keys = [...SCORE_BREAKDOWN_ORDER, ...remaining];
+  return keys
+    .filter((key) => typeof scoreBreakdown[key] === "number")
+    .map((key) => [key, Number(scoreBreakdown[key])]);
+}
 
 function formatApplied(value?: string | null): string {
   if (!value) return "-";
@@ -438,10 +479,12 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
               <article className="rounded-lg border border-slate-200 p-3">
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Score Breakdown</p>
                 <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2">
-                  <p>Semantic: {explanation?.score_breakdown?.semantic ?? "N/A"}</p>
-                  <p>Skill: {explanation?.score_breakdown?.skill ?? "N/A"}</p>
-                  <p>Experience: {explanation?.score_breakdown?.experience ?? "N/A"}</p>
-                  <p>Domain: {explanation?.score_breakdown?.domain ?? "N/A"}</p>
+                  {scoreBreakdownEntries(explanation?.score_breakdown).map(([key, value]) => (
+                    <p key={`score-breakdown-${key}`}>
+                      {toBreakdownLabel(key)}: {value}
+                    </p>
+                  ))}
+                  {!scoreBreakdownEntries(explanation?.score_breakdown).length ? <p>N/A</p> : null}
                 </div>
               </article>
 

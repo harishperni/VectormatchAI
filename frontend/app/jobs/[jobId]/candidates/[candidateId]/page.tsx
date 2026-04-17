@@ -7,6 +7,51 @@ import {
   type RankingRow,
 } from "@/lib/api";
 
+const SCORE_BREAKDOWN_ORDER = [
+  "semantic",
+  "skill",
+  "experience",
+  "domain",
+  "soft_skill",
+  "managerial_skill",
+  "distance_priority_bonus",
+  "job_hopper_penalty",
+  "anti_cheat_penalty",
+] as const;
+
+const SCORE_BREAKDOWN_LABELS: Record<string, string> = {
+  semantic: "Semantic",
+  skill: "Skill",
+  experience: "Experience",
+  domain: "Domain",
+  soft_skill: "Soft Skill",
+  managerial_skill: "Managerial Skill",
+  distance_priority_bonus: "Distance Priority Bonus",
+  job_hopper_penalty: "Job Hopper Penalty",
+  anti_cheat_penalty: "Anti-Cheat Penalty",
+};
+
+function toBreakdownLabel(key: string): string {
+  if (SCORE_BREAKDOWN_LABELS[key]) return SCORE_BREAKDOWN_LABELS[key];
+  return key
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function scoreBreakdownEntries(scoreBreakdown: Record<string, number> | undefined): Array<[string, number]> {
+  if (!scoreBreakdown) return [];
+
+  const remaining = Object.keys(scoreBreakdown).filter(
+    (key) => !SCORE_BREAKDOWN_ORDER.includes(key as (typeof SCORE_BREAKDOWN_ORDER)[number])
+  );
+  const keys = [...SCORE_BREAKDOWN_ORDER, ...remaining];
+
+  return keys
+    .filter((key) => typeof scoreBreakdown[key] === "number")
+    .map((key) => [key, Number(scoreBreakdown[key])]);
+}
+
 export default async function CandidatePage({
   params,
 }: {
@@ -120,10 +165,12 @@ export default async function CandidatePage({
         <div className="mt-6">
           <h3 className="font-semibold text-ink">Score Breakdown</h3>
           <ul className="mt-2 grid gap-2 text-slate-700 md:grid-cols-2">
-            <li>Semantic: {explanation?.score_breakdown.semantic ?? "N/A"}</li>
-            <li>Skill: {explanation?.score_breakdown.skill ?? "N/A"}</li>
-            <li>Experience: {explanation?.score_breakdown.experience ?? "N/A"}</li>
-            <li>Domain: {explanation?.score_breakdown.domain ?? "N/A"}</li>
+            {scoreBreakdownEntries(explanation?.score_breakdown).map(([key, value]) => (
+              <li key={`score-breakdown-${key}`}>
+                {toBreakdownLabel(key)}: {value}
+              </li>
+            ))}
+            {!scoreBreakdownEntries(explanation?.score_breakdown).length ? <li>N/A</li> : null}
           </ul>
         </div>
 

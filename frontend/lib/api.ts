@@ -93,12 +93,7 @@ export type ExplanationSnippet = {
 };
 
 export type CandidateExplanation = {
-  score_breakdown: {
-    semantic: number;
-    skill: number;
-    experience: number;
-    domain: number;
-  };
+  score_breakdown: Record<string, number>;
   rubric_scores?: {
     semantic_fit?: number;
     skill_fit?: number;

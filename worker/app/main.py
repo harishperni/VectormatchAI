@@ -16,8 +16,15 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.llm_parse import (
+    _extract_certifications_from_text,
+    _extract_environment_skills_from_text,
+    _extract_experience_entries_from_text,
+    _extract_professional_summary_from_text,
+    _extract_skills_from_text,
+    _extract_volunteering_from_text,
     calculate_experience_years_from_entries,
     count_date_ranges_in_text,
+    derive_current_last_job,
     derive_primary_domain,
     derive_seniority_level,
     estimate_experience_years_from_text,
@@ -288,9 +295,85 @@ def extract_resume_features_fallback(text: str) -> dict[str, Any]:
         email=emails[0] if emails else None,
         phone=phones[0] if phones else None,
     )
-    parsed["professional_summary"] = _extract_professional_summary(text)
+    parsed["experience_entries"] = _extract_experience_entries_from_text(text)
+    parsed["current_last_job"] = derive_current_last_job(parsed["experience_entries"])
+
+    extracted_skills = _extract_skills_from_text(text, parsed["experience_entries"])
+    env_skills = _extract_environment_skills_from_text(text)
+    parsed["skills"] = list(dict.fromkeys([*extracted_skills, *env_skills]))
+
+    parsed["certifications"] = _extract_certifications_from_text(text)
+    parsed["volunteering"] = _extract_volunteering_from_text(text)
+    parsed["professional_summary"] = _extract_professional_summary_from_text(text) or _extract_professional_summary(text)
+
+    lowered = text.lower()
+    if any(term in lowered for term in {"phd", "ph.d", "doctorate"}):
+        parsed["highest_degree"] = "Doctorate"
+    elif any(term in lowered for term in {"master", "m.s.", "ms", "m.sc", "mba", "m.tech"}):
+        parsed["highest_degree"] = "Master"
+    elif any(term in lowered for term in {"bachelor", "b.s.", "bs", "b.sc", "b.tech", "ba"}):
+        parsed["highest_degree"] = "Bachelor"
+    elif any(term in lowered for term in {"associate", "diploma"}):
+        parsed["highest_degree"] = "Associate"
 
     return parsed
+
+
+def _has_resume_section(text: str, names: tuple[str, ...]) -> bool:
+    pattern = r"(?im)^\s*(?:%s)\s*:?\s*$" % "|".join(re.escape(item) for item in names)
+    return bool(re.search(pattern, text))
+
+
+def _needs_parse_recovery(parsed: dict[str, Any], normalized_text: str) -> bool:
+    skills = parsed.get("skills", [])
+    entries = parsed.get("experience_entries", [])
+    has_skills = isinstance(skills, list) and len(skills) > 0
+    has_entries = isinstance(entries, list) and len(entries) > 0
+
+    if _has_resume_section(normalized_text, ("skills", "technical skills", "tools", "toolkit")) and not has_skills:
+        return True
+    if _has_resume_section(normalized_text, ("work experience", "professional experience", "experience")) and not has_entries:
+        return True
+    return False
+
+
+def _merge_with_recovery(primary: dict[str, Any], recovered: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(primary)
+    for key in (
+        "skills",
+        "experience_entries",
+        "certifications",
+        "volunteering",
+        "projects",
+        "education",
+        "languages",
+        "awards",
+        "publications",
+    ):
+        primary_value = merged.get(key)
+        if isinstance(primary_value, list) and primary_value:
+            continue
+        recovered_value = recovered.get(key)
+        if isinstance(recovered_value, list) and recovered_value:
+            merged[key] = recovered_value
+
+    for key in (
+        "professional_summary",
+        "current_last_job",
+        "highest_degree",
+        "candidate_location",
+        "email",
+        "phone",
+        "full_name",
+    ):
+        primary_value = merged.get(key)
+        if isinstance(primary_value, str) and primary_value.strip():
+            continue
+        recovered_value = recovered.get(key)
+        if isinstance(recovered_value, str) and recovered_value.strip():
+            merged[key] = recovered_value
+
+    return merged
 
 
 def build_final_payload(strict_parsed: dict[str, Any], normalized_text: str) -> dict[str, Any]:
@@ -463,6 +546,10 @@ def process_resume_text(text: str) -> dict[str, Any]:
     if strict_parsed is None:
         logger.warning("V2 model parse failed; using strict fallback")
         strict_parsed = extract_resume_features_fallback(normalized_text)
+    elif _needs_parse_recovery(strict_parsed, normalized_text):
+        logger.warning("Sparse LLM parse detected; enriching with deterministic fallback extractors")
+        recovered = extract_resume_features_fallback(normalized_text)
+        strict_parsed = _merge_with_recovery(strict_parsed, recovered)
 
     return build_final_payload(strict_parsed, normalized_text)
 

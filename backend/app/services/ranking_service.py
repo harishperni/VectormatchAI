@@ -854,10 +854,13 @@ def _is_short_term_role(entry: dict[str, Any]) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _job_hopper_penalty(parsed_json: dict[str, Any], resume: Resume) -> tuple[float, list[str]]:
+def _job_hopper_penalty(job: Job, parsed_json: dict[str, Any], resume: Resume) -> tuple[float, list[str]]:
     entries = parsed_json.get("experience_entries", [])
     if not isinstance(entries, list) or len(entries) < 2:
         return 0.0, []
+
+    short_tenure_months = int(getattr(job, "job_hopper_short_tenure_months", 12) or 12)
+    min_short_stints = int(getattr(job, "job_hopper_min_short_stints", 2) or 2)
 
     tenures: list[float] = []
     short_stints = 0
@@ -884,7 +887,7 @@ def _job_hopper_penalty(parsed_json: dict[str, Any], resume: Resume) -> tuple[fl
             ends.append(end_dt)
 
         is_current = bool(entry.get("is_current"))
-        if tenure_months < 12 and not is_current and not short_term_role:
+        if tenure_months < short_tenure_months and not is_current and not short_term_role:
             short_stints += 1
 
     if len(tenures) < 2:
@@ -897,13 +900,13 @@ def _job_hopper_penalty(parsed_json: dict[str, Any], resume: Resume) -> tuple[fl
     penalty = 0.0
     flags: list[str] = []
 
-    if avg_tenure < 14 and short_stints >= 2:
+    if avg_tenure < 14 and short_stints >= min_short_stints:
         penalty += 6.0
         flags.append("Frequent short role tenures across work history")
-    elif avg_tenure < 18 and short_stints >= 2:
+    elif avg_tenure < 18 and short_stints >= min_short_stints:
         penalty += 4.0
         flags.append("Pattern of short tenures in multiple roles")
-    elif avg_tenure < 22 and short_stints >= 3:
+    elif avg_tenure < 22 and short_stints >= (min_short_stints + 1):
         penalty += 2.0
         flags.append("Several short role durations detected")
 
@@ -1321,7 +1324,7 @@ def compute_ranking(job: Job, resume: Resume, semantic: float) -> RankingComputa
     soft_skill = _soft_skill_score(job, candidate)
     managerial_skill = _managerial_skill_score(job, candidate, parsed_json)
     distance_bonus = _distance_priority_bonus(job, parsed_json, resume)
-    job_hopper_penalty, job_hopper_flags = _job_hopper_penalty(parsed_json, resume)
+    job_hopper_penalty, job_hopper_flags = _job_hopper_penalty(job, parsed_json, resume)
     anti_cheat_penalty, anti_cheat_flags, anti_cheat_breakdown = _anti_cheat_penalty(
         job,
         resume,
@@ -1410,6 +1413,8 @@ def _job_signature(job: Job) -> str:
             "title": job.title or "",
             "description": job.description or "",
             "work_mode": getattr(job, "work_mode", "remote") or "remote",
+            "job_hopper_short_tenure_months": int(getattr(job, "job_hopper_short_tenure_months", 12) or 12),
+            "job_hopper_min_short_stints": int(getattr(job, "job_hopper_min_short_stints", 2) or 2),
             "required_skills": job.required_skills or [],
             "nice_to_have_skills": job.nice_to_have_skills or [],
             "min_experience_years": float(job.min_experience_years) if job.min_experience_years is not None else None,

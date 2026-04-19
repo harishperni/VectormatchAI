@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Numeric, Text, func
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -39,6 +39,8 @@ class Job(Base):
     work_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="remote")
     employment_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     min_experience_years: Mapped[float | None] = mapped_column(Numeric(4, 1), nullable=True)
+    job_hopper_short_tenure_months: Mapped[int] = mapped_column(Integer, nullable=False, server_default="12")
+    job_hopper_min_short_stints: Mapped[int] = mapped_column(Integer, nullable=False, server_default="2")
     required_skills: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default="[]"
     )

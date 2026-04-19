@@ -35,6 +35,8 @@ def create_job(db: Session, payload: JobCreate) -> Job:
         location=payload.location,
         work_mode=payload.work_mode,
         min_experience_years=payload.min_experience_years,
+        job_hopper_short_tenure_months=payload.job_hopper_short_tenure_months,
+        job_hopper_min_short_stints=payload.job_hopper_min_short_stints,
         required_skills=payload.required_skills,
         nice_to_have_skills=payload.nice_to_have_skills,
         domain_tags=payload.domain_tags,

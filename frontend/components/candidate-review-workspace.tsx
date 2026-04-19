@@ -53,6 +53,68 @@ function scoreBreakdownEntries(scoreBreakdown: Record<string, number> | undefine
     .map((key) => [key, Number(scoreBreakdown[key])]);
 }
 
+const CONTRIBUTION_WEIGHTS: Record<string, number> = {
+  semantic: 0.12,
+  skill: 0.28,
+  experience: 0.24,
+  domain: 0.16,
+  soft_skill: 0.10,
+  managerial_skill: 0.10,
+};
+
+function contributionRows(scoreBreakdown: Record<string, number> | undefined): Array<{
+  key: string;
+  label: string;
+  contribution: number;
+  kind: "positive" | "negative";
+}> {
+  if (!scoreBreakdown) return [];
+
+  const rows: Array<{ key: string; label: string; contribution: number; kind: "positive" | "negative" }> = [];
+  for (const [key, weight] of Object.entries(CONTRIBUTION_WEIGHTS)) {
+    const value = Number(scoreBreakdown[key]);
+    if (!Number.isFinite(value)) continue;
+    rows.push({
+      key,
+      label: toBreakdownLabel(key),
+      contribution: Number((value * weight).toFixed(2)),
+      kind: "positive",
+    });
+  }
+
+  const distanceBonus = Number(scoreBreakdown.distance_priority_bonus);
+  if (Number.isFinite(distanceBonus) && Math.abs(distanceBonus) > 0) {
+    rows.push({
+      key: "distance_priority_bonus",
+      label: toBreakdownLabel("distance_priority_bonus"),
+      contribution: Number(distanceBonus.toFixed(2)),
+      kind: distanceBonus >= 0 ? "positive" : "negative",
+    });
+  }
+
+  const jobHopperPenalty = Number(scoreBreakdown.job_hopper_penalty);
+  if (Number.isFinite(jobHopperPenalty) && jobHopperPenalty > 0) {
+    rows.push({
+      key: "job_hopper_penalty",
+      label: toBreakdownLabel("job_hopper_penalty"),
+      contribution: Number((-jobHopperPenalty).toFixed(2)),
+      kind: "negative",
+    });
+  }
+
+  const antiCheatPenalty = Number(scoreBreakdown.anti_cheat_penalty);
+  if (Number.isFinite(antiCheatPenalty) && antiCheatPenalty > 0) {
+    rows.push({
+      key: "anti_cheat_penalty",
+      label: toBreakdownLabel("anti_cheat_penalty"),
+      contribution: Number((-antiCheatPenalty).toFixed(2)),
+      kind: "negative",
+    });
+  }
+
+  return rows;
+}
+
 function formatApplied(value?: string | null): string {
   if (!value) return "-";
   const date = new Date(value);
@@ -485,6 +547,35 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                     </p>
                   ))}
                   {!scoreBreakdownEntries(explanation?.score_breakdown).length ? <p>N/A</p> : null}
+                </div>
+              </article>
+
+              <article className="rounded-lg border border-slate-200 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Score Contributions</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Weighted component impact used to compute final score.
+                </p>
+                <div className="mt-3 space-y-2">
+                  {contributionRows(explanation?.score_breakdown).map((row) => {
+                    const width = Math.min(100, Math.max(2, Math.abs(row.contribution)));
+                    return (
+                      <div key={`contribution-${row.key}`}>
+                        <div className="mb-1 flex items-center justify-between text-xs text-slate-700">
+                          <span>{row.label}</span>
+                          <span>{row.contribution >= 0 ? "+" : ""}{row.contribution.toFixed(2)}</span>
+                        </div>
+                        <div className="h-2 rounded-full bg-slate-100">
+                          <div
+                            className={`h-2 rounded-full ${row.kind === "positive" ? "bg-emerald-500" : "bg-rose-500"}`}
+                            style={{ width: `${width}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {!contributionRows(explanation?.score_breakdown).length ? (
+                    <p className="text-sm text-slate-700">No contribution data available.</p>
+                  ) : null}
                 </div>
               </article>
 

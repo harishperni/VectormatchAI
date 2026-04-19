@@ -30,6 +30,12 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
   const [minExperience, setMinExperience] = useState(
     job.min_experience_years == null ? "" : String(job.min_experience_years)
   );
+  const [jobHopperShortTenureMonths, setJobHopperShortTenureMonths] = useState(
+    String(job.job_hopper_short_tenure_months ?? 12)
+  );
+  const [jobHopperMinShortStints, setJobHopperMinShortStints] = useState(
+    String(job.job_hopper_min_short_stints ?? 2)
+  );
   const [requiredSkills, setRequiredSkills] = useState(job.required_skills.join(", "));
   const [niceToHaveSkills, setNiceToHaveSkills] = useState(job.nice_to_have_skills.join(", "));
   const [domainTags, setDomainTags] = useState(job.domain_tags.join(", "));
@@ -56,6 +62,8 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
         location: location.trim() || null,
         work_mode: workMode,
         min_experience_years: minExperience.trim() ? Number(minExperience) : null,
+        job_hopper_short_tenure_months: Number(jobHopperShortTenureMonths || "12"),
+        job_hopper_min_short_stints: Number(jobHopperMinShortStints || "2"),
         required_skills: toList(requiredSkills),
         nice_to_have_skills: toList(niceToHaveSkills),
         domain_tags: toList(domainTags),
@@ -111,6 +119,14 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
           <p>
             <span className="font-semibold text-slate-900">Min Experience:</span>{" "}
             {job.min_experience_years == null ? "Not set" : `${job.min_experience_years} years`}
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">Job Hopper Threshold:</span>{" "}
+            {job.job_hopper_short_tenure_months ?? 12} months
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">Min Short Stints:</span>{" "}
+            {job.job_hopper_min_short_stints ?? 2}
           </p>
           <p>
             <span className="font-semibold text-slate-900">Required Skills:</span>{" "}
@@ -192,6 +208,32 @@ export default function JobDetailsEditor({ jobId, job }: Props) {
               onChange={(event) => setDomainTags(event.target.value)}
               className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
               placeholder="frontend, sharepoint, enterprise"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+            Job Hopper Short Tenure (months)
+            <input
+              type="number"
+              min={3}
+              max={36}
+              step="1"
+              value={jobHopperShortTenureMonths}
+              onChange={(event) => setJobHopperShortTenureMonths(event.target.value)}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+            Job Hopper Min Short Stints
+            <input
+              type="number"
+              min={1}
+              max={6}
+              step="1"
+              value={jobHopperMinShortStints}
+              onChange={(event) => setJobHopperMinShortStints(event.target.value)}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
             />
           </label>
 

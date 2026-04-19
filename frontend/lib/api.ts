@@ -5,6 +5,8 @@ export type Job = {
   location?: string | null;
   work_mode: "remote" | "hybrid" | "inperson";
   min_experience_years: number | null;
+  job_hopper_short_tenure_months: number;
+  job_hopper_min_short_stints: number;
   required_skills: string[];
   nice_to_have_skills: string[];
   domain_tags: string[];

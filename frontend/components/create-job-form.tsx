@@ -22,6 +22,8 @@ export default function CreateJobForm() {
   const [location, setLocation] = useState("");
   const [workMode, setWorkMode] = useState<"remote" | "hybrid" | "inperson">("remote");
   const [minExperience, setMinExperience] = useState("");
+  const [jobHopperShortTenureMonths, setJobHopperShortTenureMonths] = useState("12");
+  const [jobHopperMinShortStints, setJobHopperMinShortStints] = useState("2");
   const [requiredSkills, setRequiredSkills] = useState("");
   const [niceToHaveSkills, setNiceToHaveSkills] = useState("");
   const [domainTags, setDomainTags] = useState("");
@@ -40,6 +42,8 @@ export default function CreateJobForm() {
         location: location.trim() || null,
         work_mode: workMode,
         min_experience_years: minExperience.trim() ? Number(minExperience) : null,
+        job_hopper_short_tenure_months: Number(jobHopperShortTenureMonths || "12"),
+        job_hopper_min_short_stints: Number(jobHopperMinShortStints || "2"),
         required_skills: toList(requiredSkills),
         nice_to_have_skills: toList(niceToHaveSkills),
         domain_tags: toList(domainTags),
@@ -60,6 +64,8 @@ export default function CreateJobForm() {
       setLocation("");
       setWorkMode("remote");
       setMinExperience("");
+      setJobHopperShortTenureMonths("12");
+      setJobHopperMinShortStints("2");
       setRequiredSkills("");
       setNiceToHaveSkills("");
       setDomainTags("");
@@ -146,6 +152,34 @@ export default function CreateJobForm() {
             onChange={(event) => setDomainTags(event.target.value)}
             className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
             placeholder="manufacturing, analytics, finance"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+          Job Hopper Short Tenure (months)
+          <input
+            type="number"
+            min={3}
+            max={36}
+            step="1"
+            value={jobHopperShortTenureMonths}
+            onChange={(event) => setJobHopperShortTenureMonths(event.target.value)}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="12"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+          Job Hopper Min Short Stints
+          <input
+            type="number"
+            min={1}
+            max={6}
+            step="1"
+            value={jobHopperMinShortStints}
+            onChange={(event) => setJobHopperMinShortStints(event.target.value)}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="2"
           />
         </label>
 

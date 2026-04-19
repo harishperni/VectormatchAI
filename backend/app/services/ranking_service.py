@@ -824,6 +824,56 @@ def _distance_priority_bonus(job: Job, parsed_json: dict[str, Any], resume: Resu
     return -8.0 if work_mode == "inperson" else -6.0
 
 
+def _evaluate_knockout_rules(job: Job, resume: Resume, parsed_json: dict[str, Any]) -> dict[str, Any]:
+    min_years = float(job.min_experience_years) if job.min_experience_years is not None else None
+    resume_years = float(resume.experience_years) if resume.experience_years is not None else None
+
+    years_pass = True
+    years_value = "Not required"
+    if min_years is not None:
+        years_pass = resume_years is not None and resume_years >= min_years
+        years_value = f"{resume_years:.1f} >= {min_years:.1f}" if resume_years is not None else f"missing >= {min_years:.1f}"
+
+    work_mode = str(getattr(job, "work_mode", "remote") or "remote").lower().strip()
+    location = _resolve_job_location(job)
+
+    answers = [
+        {
+            "id": "visa_sponsorship",
+            "question": "Need visa sponsorship?",
+            "pass": True,
+            "value": "Assumed compliant from application form",
+            "assumed": True,
+        },
+        {
+            "id": "minimum_experience",
+            "question": "Years of experience >= X?",
+            "pass": years_pass,
+            "value": years_value,
+            "assumed": False,
+        },
+        {
+            "id": "onsite_willingness",
+            "question": "Willing to work onsite in city?",
+            "pass": True,
+            "value": (
+                f"Assumed compliant for {work_mode} role"
+                + (f" in {location}" if location else "")
+            ),
+            "assumed": True,
+        },
+    ]
+
+    failed_reasons = [str(item["question"]) for item in answers if item.get("pass") is False]
+    overall_pass = len(failed_reasons) == 0
+    return {
+        "overall_pass": overall_pass,
+        "auto_reject": not overall_pass,
+        "failed_reasons": failed_reasons,
+        "answers": answers,
+    }
+
+
 def _months_between(start_dt: datetime, end_dt: datetime) -> float:
     months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
     if end_dt.day >= start_dt.day:
@@ -1560,6 +1610,10 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
 
         result = compute_ranking(job, resume, semantic)
         parsed_json = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
+        knockout_evaluation = _evaluate_knockout_rules(job, resume, parsed_json)
+        if knockout_evaluation.get("auto_reject"):
+            result.final = 0.0
+            result.reasons = ["Disqualified by knockout rule(s)"]
         evidence_snippets = []
 
         if parsed_json.get("current_last_job"):
@@ -1595,6 +1649,7 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
             "base_confidence": result.confidence,
             "matched_skills": result.matched_skills,
             "missing_skills": result.missing_skills,
+            "knockout_evaluation": knockout_evaluation,
             "job_hopper_flags": result.job_hopper_flags,
             "anti_cheat_flags": result.anti_cheat_flags,
             "anti_cheat_breakdown": result.anti_cheat_breakdown,
@@ -1740,6 +1795,10 @@ def run_ranking_for_job(db: Session, job: Job) -> int:
                     + (LLM_CONFIDENCE_WEIGHT * llm_confidence)
                 )
 
+        if isinstance(explanation_json.get("knockout_evaluation"), dict):
+            if bool(explanation_json["knockout_evaluation"].get("auto_reject")):
+                result.final = 0.0
+
         explanation_json["final_score"] = result.final
         explanation_json["final_confidence"] = result.confidence
         explanation_json["llm_used"] = True
@@ -1878,6 +1937,11 @@ def get_rankings_for_job(
             [str(item) for item in (resume.skills_json if isinstance(resume.skills_json, list) else [])]
         )
         candidate_action = action_by_candidate.get(str(ranking.candidate_id))
+        knockout_payload = payload.get("knockout_evaluation", {})
+        if not isinstance(knockout_payload, dict):
+            knockout_payload = {}
+        knockout_auto_reject = bool(knockout_payload.get("auto_reject", False))
+        effective_action = candidate_action or ("auto_rejected" if knockout_auto_reject else None)
         experience_years = float(resume.experience_years) if resume.experience_years is not None else None
         score = float(ranking.score)
 
@@ -1887,8 +1951,14 @@ def get_rankings_for_job(
             continue
         if skill and skill.lower() not in resume_skills:
             continue
-        if action and (candidate_action or "").lower() != action.lower():
-            continue
+        if action:
+            action_l = action.lower()
+            effective_l = (effective_action or "").lower()
+            if action_l == "rejected":
+                if effective_l not in {"rejected", "auto_rejected"}:
+                    continue
+            elif effective_l != action_l:
+                continue
         if keyword:
             keyword_l = keyword.lower()
             haystack = " ".join(
@@ -1938,7 +2008,7 @@ def get_rankings_for_job(
         if status:
             status_l = status.lower()
             parse_status = (resume.parse_status or "").lower()
-            action_status = (candidate_action or "").lower()
+            action_status = (effective_action or "").lower()
             if status_l == "review":
                 pass
             elif status_l not in {parse_status, action_status}:
@@ -1957,6 +2027,8 @@ def get_rankings_for_job(
             if isinstance(payload.get("job_hopper_flags", []), list)
             else [],
         )
+        if knockout_auto_reject:
+            audit_flags.insert(0, "Disqualified by knockout screening")
         output.append(
             {
                 "candidate_id": str(ranking.candidate_id),
@@ -1976,7 +2048,7 @@ def get_rankings_for_job(
                 "sponsorship_required": sponsorship if isinstance(sponsorship, bool) else None,
                 "willing_to_relocate": willing_to_relocate if isinstance(willing_to_relocate, bool) else None,
                 "top_reasons": reasons[:3] if isinstance(reasons, list) else [],
-                "action_status": candidate_action,
+                "action_status": effective_action,
                 "audit_flags": audit_flags,
                 "audit_summary": _build_audit_summary(
                     matched_skills=matched_skills,
@@ -1993,6 +2065,10 @@ def get_rankings_for_job(
                 "job_hopper_score": job_hopper_score,
                 "job_hopper_flags": payload.get("job_hopper_flags", [])
                 if isinstance(payload.get("job_hopper_flags", []), list)
+                else [],
+                "knockout_status": "disqualified" if knockout_auto_reject else "qualified",
+                "knockout_reasons": knockout_payload.get("failed_reasons", [])
+                if isinstance(knockout_payload.get("failed_reasons", []), list)
                 else [],
                 "anti_cheat_score": anti_cheat_score,
             }
@@ -2038,6 +2114,7 @@ def get_candidate_explanation(
         "rubric_scores": payload.get("rubric_scores", {}),
         "matched_skills": payload.get("matched_skills", []),
         "missing_skills": payload.get("missing_skills", []),
+        "knockout_evaluation": payload.get("knockout_evaluation", {}),
         "job_hopper_flags": payload.get("job_hopper_flags", []),
         "anti_cheat_flags": payload.get("anti_cheat_flags", []),
         "job_hopper_score": _clamp_0_100(

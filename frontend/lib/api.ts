@@ -33,6 +33,8 @@ export type RankingRow = {
   audit_flags?: string[];
   audit_summary?: string | null;
   audit_detail?: string[];
+  knockout_status?: "qualified" | "disqualified" | string;
+  knockout_reasons?: string[];
   anti_cheat_score?: number;
 };
 
@@ -104,6 +106,18 @@ export type CandidateExplanation = {
   };
   matched_skills: string[];
   missing_skills: string[];
+  knockout_evaluation?: {
+    overall_pass?: boolean;
+    auto_reject?: boolean;
+    failed_reasons?: string[];
+    answers?: Array<{
+      id?: string;
+      question?: string;
+      pass?: boolean;
+      value?: string;
+      assumed?: boolean;
+    }>;
+  };
   evidence_snippets: ExplanationSnippet[];
   summary: string;
   model_version: string;

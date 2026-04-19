@@ -21,6 +21,8 @@ class RankingRow(BaseModel):
     audit_flags: list[str] = Field(default_factory=list)
     audit_summary: str | None = None
     audit_detail: list[str] = Field(default_factory=list)
+    knockout_status: str = "qualified"
+    knockout_reasons: list[str] = Field(default_factory=list)
     job_hopper_score: float = 0.0
     job_hopper_flags: list[str] = Field(default_factory=list)
     anti_cheat_score: float = 0.0
@@ -37,6 +39,7 @@ class ExplanationResponse(BaseModel):
     rubric_scores: dict[str, float] = Field(default_factory=dict)
     matched_skills: list[str]
     missing_skills: list[str]
+    knockout_evaluation: dict[str, object] = Field(default_factory=dict)
     evidence_snippets: list[dict[str, str]]
     summary: str
     model_version: str

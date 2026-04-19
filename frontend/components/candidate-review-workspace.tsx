@@ -128,6 +128,7 @@ function mapActionToStage(action?: string | null): string {
   if (normalized === "shortlisted") return "Shortlisted";
   if (normalized === "interviewed") return "Interview";
   if (normalized === "hired") return "Offer";
+  if (normalized === "auto_rejected") return "Rejected";
   if (normalized === "rejected") return "Rejected";
   return "New";
 }
@@ -593,6 +594,36 @@ export default function CandidateReviewWorkspace({ jobId, rows, resumes }: Props
                       : "N/A"}
                   </p>
                 </div>
+              </article>
+
+              <article className="rounded-lg border border-slate-200 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Knockout Screening</p>
+                <p className="mt-2 text-sm text-slate-700">
+                  Status:{" "}
+                  <span className="font-semibold">
+                    {explanation?.knockout_evaluation?.auto_reject ? "Disqualified" : "Qualified"}
+                  </span>
+                </p>
+                {explanation?.knockout_evaluation?.failed_reasons?.length ? (
+                  <p className="mt-1 text-sm text-rose-700">
+                    Failed: {explanation.knockout_evaluation.failed_reasons.join(" | ")}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-sm text-emerald-700">All knockout rules passed.</p>
+                )}
+                {explanation?.knockout_evaluation?.answers?.length ? (
+                  <div className="mt-3 space-y-1 text-sm text-slate-700">
+                    {explanation.knockout_evaluation.answers.map((answer, idx) => (
+                      <p key={`knockout-answer-${idx}`}>
+                        {answer.question ?? "Question"}:{" "}
+                        <span className={answer.pass ? "text-emerald-700" : "text-rose-700"}>
+                          {answer.pass ? "Pass" : "Fail"}
+                        </span>
+                        {answer.value ? ` (${answer.value})` : ""}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
               </article>
 
               <article className="rounded-lg border border-slate-200 p-3">

@@ -27,6 +27,28 @@ function isAntiCheatFlagged(row: RankingRow): boolean {
   return Number.isFinite(score) && score > 10;
 }
 
+function normalizeDegreeLabel(raw: string | null | undefined): string {
+  const value = (raw || "").trim();
+  if (!value) return "Unknown";
+
+  const normalized = value.toLowerCase().replace(/\./g, "").replace(/\s+/g, " ").trim();
+
+  const masterSciencePatterns = [
+    "ms",
+    "m s",
+    "msc",
+    "m sc",
+    "master of science",
+    "masters of science",
+    "master science",
+  ];
+  if (masterSciencePatterns.includes(normalized) || normalized.includes("master of science")) {
+    return "Master of Science";
+  }
+
+  return value;
+}
+
 export default function CandidateDashboardTab({ rows }: Props) {
   const summary = useMemo(() => {
     const total = rows.length;
@@ -75,7 +97,7 @@ export default function CandidateDashboardTab({ rows }: Props) {
       else if (years < 5) experienceBands["2-5 yrs"] += 1;
       else experienceBands["5+ yrs"] += 1;
 
-      const degree = (row.highest_degree || "Unknown").trim() || "Unknown";
+      const degree = normalizeDegreeLabel(row.highest_degree);
       degreeCounts[degree] = (degreeCounts[degree] || 0) + 1;
 
       if (isAntiCheatFlagged(row)) {

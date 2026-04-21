@@ -198,6 +198,7 @@ export async function fetchRankings(
     distance_max?: number;
     sponsorship_required?: boolean;
     total_experience_min?: number;
+    knockout_status?: string;
   }
 ): Promise<RankingRow[]> {
   const params = new URLSearchParams();
@@ -216,6 +217,9 @@ export async function fetchRankings(
   }
   if (filters?.total_experience_min !== undefined) {
     params.set("total_experience_min", String(filters.total_experience_min));
+  }
+  if (filters?.knockout_status) {
+    params.set("knockout_status", filters.knockout_status);
   }
 
   const response = await fetch(

@@ -73,6 +73,7 @@ def get_rankings(
     distance_max: float | None = Query(default=None, ge=0),
     sponsorship_required: bool | None = Query(default=None),
     total_experience_min: float | None = Query(default=None, ge=0),
+    knockout_status: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> RankingListResponse:
     try:
@@ -95,6 +96,7 @@ def get_rankings(
         distance_max=distance_max,
         sponsorship_required=sponsorship_required,
         total_experience_min=total_experience_min,
+        knockout_status=knockout_status,
     )
     return RankingListResponse(job_id=job_id, count=len(items), items=items)
 

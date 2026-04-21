@@ -1884,6 +1884,7 @@ def get_rankings_for_job(
     distance_max: float | None = None,
     sponsorship_required: bool | None = None,
     total_experience_min: float | None = None,
+    knockout_status: str | None = None,
 ) -> list[dict]:
     job = db.get(Job, job_id)
     job_location = _resolve_job_location(job)
@@ -1941,6 +1942,7 @@ def get_rankings_for_job(
         if not isinstance(knockout_payload, dict):
             knockout_payload = {}
         knockout_auto_reject = bool(knockout_payload.get("auto_reject", False))
+        knockout_status_value = "disqualified" if knockout_auto_reject else "qualified"
         effective_action = candidate_action or ("auto_rejected" if knockout_auto_reject else None)
         experience_years = float(resume.experience_years) if resume.experience_years is not None else None
         score = float(ranking.score)
@@ -2004,6 +2006,11 @@ def get_rankings_for_job(
             experience_years is None or experience_years < total_experience_min
         ):
             continue
+        if knockout_status:
+            normalized_knockout = knockout_status.strip().lower()
+            if normalized_knockout in {"qualified", "disqualified"}:
+                if knockout_status_value != normalized_knockout:
+                    continue
 
         if status:
             status_l = status.lower()
@@ -2066,7 +2073,7 @@ def get_rankings_for_job(
                 "job_hopper_flags": payload.get("job_hopper_flags", [])
                 if isinstance(payload.get("job_hopper_flags", []), list)
                 else [],
-                "knockout_status": "disqualified" if knockout_auto_reject else "qualified",
+                "knockout_status": knockout_status_value,
                 "knockout_reasons": knockout_payload.get("failed_reasons", [])
                 if isinstance(knockout_payload.get("failed_reasons", []), list)
                 else [],

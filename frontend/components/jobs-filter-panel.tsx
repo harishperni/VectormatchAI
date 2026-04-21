@@ -12,6 +12,7 @@ type Props = {
     distance_max?: string;
     sponsorship_required?: string;
     total_experience_min?: string;
+    knockout_status?: string;
     min_score?: string;
     min_experience?: string;
     skill?: string;
@@ -34,6 +35,7 @@ export default function JobsFilterPanel({ initial }: Props) {
   const [distanceMax, setDistanceMax] = useState(initial.distance_max ?? "");
   const [sponsorshipRequired, setSponsorshipRequired] = useState(initial.sponsorship_required ?? "");
   const [totalExperienceMin, setTotalExperienceMin] = useState(initial.total_experience_min ?? "");
+  const [knockoutStatus, setKnockoutStatus] = useState(initial.knockout_status ?? "");
 
   function applyFilters() {
     const params = new URLSearchParams(current.toString());
@@ -68,6 +70,9 @@ export default function JobsFilterPanel({ initial }: Props) {
     if (totalExperienceMin) params.set("total_experience_min", totalExperienceMin);
     else params.delete("total_experience_min");
 
+    if (knockoutStatus) params.set("knockout_status", knockoutStatus);
+    else params.delete("knockout_status");
+
     router.push(`${pathname}?${params.toString()}`);
   }
 
@@ -82,6 +87,7 @@ export default function JobsFilterPanel({ initial }: Props) {
     setDistanceMax("");
     setSponsorshipRequired("");
     setTotalExperienceMin("");
+    setKnockoutStatus("");
     router.push(pathname);
   }
 
@@ -216,6 +222,21 @@ export default function JobsFilterPanel({ initial }: Props) {
             placeholder="3"
             className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
           />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Knockout Status
+          </label>
+          <select
+            value={knockoutStatus}
+            onChange={(event) => setKnockoutStatus(event.target.value)}
+            className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
+          >
+            <option value="">All</option>
+            <option value="qualified">Qualified</option>
+            <option value="disqualified">Disqualified</option>
+          </select>
         </div>
 
         <div>

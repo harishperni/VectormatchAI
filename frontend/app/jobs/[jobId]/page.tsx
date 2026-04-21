@@ -27,6 +27,7 @@ export default async function JobRankingPage({
     distance_max: "",
     sponsorship_required: "",
     total_experience_min: "",
+    knockout_status: "",
     min_score: "",
     min_experience: "",
     skill: "",
@@ -62,6 +63,9 @@ export default async function JobRankingPage({
   const totalExperienceMinValue = Array.isArray(resolvedSearchParams.total_experience_min)
     ? resolvedSearchParams.total_experience_min[0]
     : resolvedSearchParams.total_experience_min;
+  const knockoutStatusValue = Array.isArray(resolvedSearchParams.knockout_status)
+    ? resolvedSearchParams.knockout_status[0]
+    : resolvedSearchParams.knockout_status;
 
   let job: Job | null = null;
   let rankings: RankingRow[] = [];
@@ -89,6 +93,7 @@ export default async function JobRankingPage({
         total_experience_min: totalExperienceMinValue
           ? Number(totalExperienceMinValue)
           : undefined,
+        knockout_status: knockoutStatusValue || undefined,
       }),
       fetchJobResumes(jobId),
     ]);
@@ -130,6 +135,7 @@ export default async function JobRankingPage({
               sponsorshipRequiredValue ?? defaultFilters.sponsorship_required,
             total_experience_min:
               totalExperienceMinValue ?? defaultFilters.total_experience_min,
+            knockout_status: knockoutStatusValue ?? defaultFilters.knockout_status,
           }}
         />
 

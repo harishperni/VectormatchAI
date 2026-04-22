@@ -156,6 +156,99 @@ Microsoft 365, SharePoint Online, Power Automate, Power Apps
         self.assertIn("power automate", skills)
         self.assertIn("sharepoint online", skills)
 
+    def test_extracts_company_when_location_is_on_same_line(self) -> None:
+        parsed = {"experience_entries": []}
+        raw_text = """
+WORK EXPERIENCE
+Vietnam Bank for Social Policies (VBSP) Chennai, India Oct 2011 to Jan 2014
+Java / J2EE Developer
+Bob Tech, Bangalore, India Aug 2009 to Oct 2010
+Software Engineer
+EDUCATION
+Bachelor of Computer Science
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("company"), "Vietnam Bank for Social Policies (VBSP)")
+        self.assertEqual(entries[0].get("title"), "Java / J2EE Developer")
+        self.assertEqual(entries[0].get("location"), "Chennai, India")
+
+    def test_strips_skill_category_prefix_noise(self) -> None:
+        parsed = {
+            "skills": [
+                "Programming Languages: JAVA",
+                "Web Services: SOAP",
+                "Databases: Oracle",
+                "Methodologies: Agile",
+                "2.x",
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        skills = normalized.get("skills", [])
+        self.assertIn("JAVA", skills)
+        self.assertIn("SOAP", skills)
+        self.assertIn("Oracle", skills)
+        self.assertIn("Agile", skills)
+        self.assertNotIn("2.x", skills)
+
+    def test_fallback_recovery_fills_missing_descriptions(self) -> None:
+        parsed = {
+            "experience_entries": [
+                {
+                    "company": "Union Pacific Railroad",
+                    "title": "Senior Java Developer",
+                    "location": "Dallas, TX",
+                    "start_date": "2015-12",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": None,
+                    "skills_used": [],
+                    "achievements": [],
+                },
+                {
+                    "company": "Misys Financial Services",
+                    "title": "Sr Full Stack Java Developer",
+                    "location": "Bangalore, India",
+                    "start_date": "2014-03",
+                    "end_date": "2015-12",
+                    "is_current": False,
+                    "description": None,
+                    "skills_used": [],
+                    "achievements": [],
+                },
+            ]
+        }
+        raw_text = """
+WORK EXPERIENCE
+Union Pacific Railroad, Dallas, TX Dec 2015 to Till Date Senior Java Developer
+Responsibilities:
+Implemented Spring MVC and Hibernate modules.
+Built REST APIs and deployed with Jenkins.
+Misys Financial Services, Bangalore, India Mar 2014 – Dec 2015
+Sr Full Stack Java Developer
+Responsibilities:
+Developed Java/J2EE services and Hibernate DAO layer.
+EDUCATION
+Bachelor of Computer Science from Osmania University in 2008.
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 2)
+        self.assertTrue(any(isinstance(item.get("description"), str) and item.get("description") for item in entries))
+
+    def test_extracts_education_when_llm_returns_empty_education(self) -> None:
+        normalized = _normalize_llm_parse_output_v2(
+            {"education": []},
+            "EDUCATION AND CERTIFICATIONS\nBachelor of Computer Science from Osmania University in 2008.",
+        )
+        education = normalized.get("education", [])
+        self.assertGreaterEqual(len(education), 1)
+        self.assertIn("Bachelor", str(education[0].get("degree") or ""))
+        self.assertIn("Osmania University", str(education[0].get("institution") or ""))
+
 
 if __name__ == "__main__":
     unittest.main()

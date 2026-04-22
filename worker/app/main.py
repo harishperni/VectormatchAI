@@ -85,7 +85,10 @@ STRICT_EMPTY_OUTPUT = {
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not set")
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    dsn = DATABASE_URL.strip()
+    if dsn.startswith("postgresql+psycopg://"):
+        dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+    return psycopg.connect(dsn, row_factory=dict_row)
 
 
 def resolve_file_path(file_url: str) -> Path:

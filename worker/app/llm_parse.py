@@ -20,8 +20,8 @@ LLM_PARSE_MODEL = os.getenv(
     "OPENAI_PARSE_MODEL",
     "ft:gpt-4.1-nano-2025-04-14:personal:resume-parser-v2nano500:DNmfuCvx",
 ).strip()
-LLM_PARSE_TIMEOUT = int(os.getenv("LLM_PARSE_TIMEOUT_SECONDS", "60"))
-LLM_PARSE_MAX_RETRIES = int(os.getenv("LLM_PARSE_MAX_RETRIES", "2"))
+LLM_PARSE_TIMEOUT = int(os.getenv("LLM_PARSE_TIMEOUT_SECONDS", "90"))
+LLM_PARSE_MAX_RETRIES = int(os.getenv("LLM_PARSE_MAX_RETRIES", "4"))
 
 ATS_RESUME_SCHEMA_DESCRIPTION_V2 = """You are an expert resume parser.
 
@@ -231,7 +231,7 @@ def _post_chat_completions(payload: dict[str, Any]) -> dict[str, Any] | None:
             return None
 
         if attempt < LLM_PARSE_MAX_RETRIES:
-            time.sleep(0.5 * attempt)
+            time.sleep(1.0 * attempt)
 
     return None
 
@@ -388,6 +388,8 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
 
     result["projects"] = [item for item in result["projects"] if not _is_empty_project(item)]
     result["education"] = [item for item in result["education"] if not _is_empty_education(item)]
+    if not result["education"]:
+        result["education"] = _extract_education_from_text(raw_text)
 
     environment_skills = _extract_environment_skills_from_text(raw_text)
     if not result["skills"] and _has_skills_section(raw_text):
@@ -503,7 +505,17 @@ def _normalize_company_string(value: Any) -> str | None:
         fragment = re.sub(r"(?i)\blocation\s*:\s*", "", part).strip()
         if not fragment:
             continue
-        if _extract_location_fragment(fragment):
+        location_fragment = _extract_location_fragment(fragment)
+        if location_fragment:
+            # Preserve organization text even when location is on the same line.
+            fragment = re.sub(
+                re.escape(location_fragment),
+                " ",
+                fragment,
+                flags=re.IGNORECASE,
+            )
+            fragment = re.sub(r"\s+", " ", fragment).strip(" |,-")
+        if not fragment or _looks_like_location_text(fragment):
             continue
         cleaned_parts.append(fragment)
 
@@ -581,10 +593,12 @@ def _experience_entries_need_fallback(entries: Any, raw_text: str) -> bool:
 
     weak_entries = 0
     missing_company_entries = 0
+    missing_description_entries = 0
     for entry in entries:
         if not isinstance(entry, dict):
             weak_entries += 1
             missing_company_entries += 1
+            missing_description_entries += 1
             continue
         company = _clean_string(entry.get("company"))
         title = _clean_string(entry.get("title"))
@@ -592,12 +606,19 @@ def _experience_entries_need_fallback(entries: Any, raw_text: str) -> bool:
         malformed_company = bool(company and re.search(r"(?i)\b(location|duration)\s*:", company))
         if not company:
             missing_company_entries += 1
+        if not description:
+            missing_description_entries += 1
         if (not title and not description) or malformed_company:
             weak_entries += 1
 
     if weak_entries >= max(2, len(entries) // 2):
         return True
     if missing_company_entries >= max(2, len(entries) // 2) and _count_date_ranges(raw_text) >= len(entries):
+        return True
+    if (
+        missing_description_entries >= max(2, len(entries) // 2)
+        and re.search(r"(?i)\b(responsibilities|environment|project)\s*:?", raw_text)
+    ):
         return True
     return False
 
@@ -707,6 +728,51 @@ def _has_certification_section(text: str) -> bool:
             text,
         )
     )
+
+
+def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    block = _extract_section_block(
+        text,
+        r"^\s*(education(?: and certifications)?|education & certifications)\s*:?\s*$",
+        max_lines=60,
+    )
+    if not block:
+        block = lines[-30:]
+
+    joined = " ".join(block)
+    if not joined:
+        return []
+
+    degree_match = re.search(
+        r"(?i)\b(bachelor(?:s)?(?:\s+of\s+[a-z .&/-]+)?|master(?:s)?(?:\s+of\s+[a-z .&/-]+)?|ph\.?d|doctorate)\b",
+        joined,
+    )
+    institution_match = re.search(
+        r"(?i)\bfrom\s+([A-Z][A-Za-z .'-]{3,80}(?:University|Institute|College))\b",
+        joined,
+    )
+    if not institution_match:
+        institution_match = re.search(
+            r"(?i)\b([A-Z][A-Za-z .'-]{3,80}(?:University|Institute|College))\b",
+            joined,
+        )
+    year_match = re.search(r"\b(19|20)\d{2}\b", joined)
+
+    if not (degree_match or institution_match or year_match):
+        return []
+
+    return [
+        {
+            "institution": _clean_string(institution_match.group(1)) if institution_match else None,
+            "degree": _clean_string(degree_match.group(1)) if degree_match else None,
+            "field_of_study": None,
+            "start_date": None,
+            "end_date": f"{year_match.group(0)}-06" if year_match else None,
+            "gpa": None,
+            "location": None,
+        }
+    ]
 
 
 def _has_volunteering_section(text: str) -> bool:
@@ -1113,6 +1179,15 @@ def _extract_location_fragment(value: str) -> str | None:
     line = _clean_string(value)
     if not line:
         return None
+    trailing_match = re.search(
+        r"\b([A-Za-z][A-Za-z .'-]{0,40},\s*(?:[A-Z]{2}|[A-Za-z]+)(?:,\s*(?:USA|US|United States))?)\s*$",
+        line,
+    )
+    if trailing_match:
+        candidate = _clean_string(trailing_match.group(1))
+        if candidate and _looks_like_location_text(candidate):
+            return candidate
+
     match = re.search(
         r"\b([A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)(?:,\s*(?:USA|US|United States))?)\b",
         line,
@@ -1183,6 +1258,8 @@ def _looks_like_location_text(value: str) -> bool:
     if region_clean.lower() in us_states:
         return True
     if region_clean.lower() in {"usa", "us", "united states"}:
+        return True
+    if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,30}", region_clean):
         return True
 
     return False
@@ -1462,8 +1539,14 @@ def _extract_date_range_from_text(text: str) -> tuple[str | None, str | None, bo
 def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
     lines = [line.strip() for line in _extract_work_experience_block(text).splitlines() if line.strip()]
     entries: list[dict[str, Any]] = []
+    date_line_indexes = [
+        idx
+        for idx, line in enumerate(lines)
+        if _extract_date_range_from_text(line) != (None, None, False)
+    ]
 
-    for idx, line in enumerate(lines):
+    for pos, idx in enumerate(date_line_indexes):
+        line = lines[idx]
         start_date, end_date, is_current = _extract_date_range_from_text(line)
         if not start_date and not end_date and not is_current:
             continue
@@ -1526,6 +1609,23 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
             ):
                 title = prev_line_clean
 
+        next_entry_idx = date_line_indexes[pos + 1] if pos + 1 < len(date_line_indexes) else len(lines)
+        description_start = idx + 1
+        if title and idx + 1 < len(lines):
+            maybe_title_line = _clean_string(lines[idx + 1])
+            if maybe_title_line and title == maybe_title_line:
+                description_start = idx + 2
+
+        description_lines: list[str] = []
+        for desc_idx in range(description_start, next_entry_idx):
+            desc_line = _clean_string(lines[desc_idx])
+            if not desc_line:
+                continue
+            if re.fullmatch(r"(?i)(responsibilities|environment|project)\s*:?", desc_line):
+                continue
+            description_lines.append(desc_line)
+        description = _trim_experience_description(" ".join(description_lines)) if description_lines else None
+
         entries.append(
             {
                 "company": company,
@@ -1535,7 +1635,7 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
                 "end_date": end_date,
                 "is_current": bool(is_current),
                 "employment_type": None,
-                "description": None,
+                "description": description,
                 "skills_used": [],
                 "achievements": [],
             }
@@ -1718,16 +1818,59 @@ def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
 
     filtered: list[str] = []
     for token in _unique_clean_strings(normalized_candidates):
-        lowered = token.lower()
+        cleaned_token = _strip_skill_category_prefix(token)
+        if not cleaned_token:
+            continue
+
+        lowered = cleaned_token.lower()
         if re.search(r"\b(certification|certified|certificate|credential)\b", lowered):
             continue
         if re.search(r"\b(fundamentals|associate|professional|mcp)\b", lowered):
             continue
+        if lowered in {
+            "programming languages",
+            "j2ee technologies",
+            "web technologies",
+            "databases",
+            "xml technologies",
+            "web services",
+            "methodologies",
+            "operating systems",
+            "application frameworks",
+            "version control",
+            "other tools",
+            "tools",
+            "ides",
+            "application servers",
+            "application",
+            "web",
+            "tests",
+            "ci",
+            "cd",
+            "vcs",
+            "back-end",
+        }:
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+|\.x|x)?", lowered):
+            continue
         if cert_names and any(lowered == name or lowered in name or name in lowered for name in cert_names):
             continue
-        filtered.append(token)
+        filtered.append(cleaned_token)
 
     return _unique_clean_strings(filtered)
+
+
+def _strip_skill_category_prefix(value: str) -> str | None:
+    cleaned = _clean_string(value)
+    if not cleaned:
+        return None
+
+    stripped = re.sub(
+        r"(?i)^\s*(programming languages?|j2ee technologies?|web technologies?|databases?|xml technologies?|web services?|methodologies?|operating systems?|application frameworks?|version control|other tools?|tools?|ides?|application\/web server)\s*:\s*",
+        "",
+        cleaned,
+    ).strip()
+    return stripped or None
 
 
 def _split_skill_candidate(value: str) -> list[str]:
@@ -2028,8 +2171,26 @@ def derive_primary_domain(
 
     rules = [
         ("Mobile Engineering", ["ios", "android", "flutter", "react native", "mobile"]),
+        (
+            "Backend Engineering",
+            [
+                "backend",
+                "api developer",
+                "server-side",
+                "microservices",
+                "java",
+                "j2ee",
+                "spring",
+                "hibernate",
+                "servlet",
+                "jdbc",
+                "golang",
+                "go",
+                "php",
+                "rails",
+            ],
+        ),
         ("Frontend Engineering", ["frontend", "ui engineer", "react", "angular", "vue", "css"]),
-        ("Backend Engineering", ["backend", "api developer", "server-side", "microservices", "golang", "go", "php", "rails"]),
         ("Data Engineering", ["data engineer", "etl", "spark", "airflow", "warehouse"]),
         ("ML/AI Engineering", ["llm", "machine learning", "ml engineer", "rag", "bedrock", "llamaindex", "openai api", "anthropic"]),
         ("DevOps/Platform", ["devops", "platform", "terraform", "kubernetes", "ci/cd"]),

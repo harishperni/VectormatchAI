@@ -157,6 +157,7 @@ PRESENT_WORDS = {
 PRESENT_TOKEN_PATTERN = r"present|current|currently|now|today|ongoing|till(?:\s+(?:date|now))?|to\s+date"
 
 URL_PATTERN = re.compile(r"https?://[^\s|,;]+", re.IGNORECASE)
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 MONTH_NAME_PATTERN = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 DATE_RANGE_MONTH_PATTERN = re.compile(
     rf"(?P<smon>{MONTH_NAME_PATTERN})\s*[,/-]?\s*(?P<syear>\d{{4}})\s*(?:-|–|—|to)\s*(?:(?P<emon>{MONTH_NAME_PATTERN})\s*[,/-]?\s*(?P<eyear>\d{{4}})|(?P<present>{PRESENT_TOKEN_PATTERN}))",
@@ -407,6 +408,8 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         result["volunteering"] = _stringify_volunteering_entries(result["volunteering_entries"])
 
     result["phone"] = _normalize_phone_value(result.get("phone"), raw_text)
+    if result["email"] is None:
+        result["email"] = _extract_email_from_text(raw_text)
     result["skills"] = _postprocess_skills(
         result.get("skills", []),
         result.get("certifications", []),
@@ -1486,20 +1489,42 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
                     break
 
         title = None
-        if idx + 1 < len(lines):
-            next_line = lines[idx + 1]
+        is_location_duration_line = bool(
+            re.search(r"\b(location|duration)\b", line, re.IGNORECASE)
+        )
+        if is_location_duration_line and idx > 0:
+            prev_line = lines[idx - 1]
+            prev_line_clean = _clean_string(prev_line)
             if (
-                len(next_line.split()) <= 14
-                and not re.search(r"(role and responsibilities|technologies|project|education)", next_line, re.IGNORECASE)
-                and not _looks_like_org_line(next_line)
+                prev_line_clean
+                and len(prev_line_clean.split()) <= 14
+                and not re.search(r"(location|duration|project|education|experience)", prev_line_clean, re.IGNORECASE)
+                and not _looks_like_org_line(prev_line_clean)
             ):
-                title = _clean_string(next_line)
+                title = prev_line_clean
+
+        if not title and idx + 1 < len(lines):
+            next_line = lines[idx + 1]
+            next_line_clean = _clean_string(next_line)
+            if (
+                next_line_clean
+                and len(next_line_clean.split()) <= 10
+                and not next_line_clean.endswith(".")
+                and not re.search(r"(role and responsibilities|technologies|project|education)", next_line_clean, re.IGNORECASE)
+                and not _looks_like_org_line(next_line_clean)
+            ):
+                title = next_line_clean
+
         if not title and idx > 0:
             prev_line = lines[idx - 1]
-            if len(prev_line.split()) <= 14 and not re.search(r"(location|duration|project|education|experience)", prev_line, re.IGNORECASE):
-                prev_line_clean = _clean_string(prev_line)
-                if prev_line_clean and not _looks_like_org_line(prev_line_clean):
-                    title = prev_line_clean
+            prev_line_clean = _clean_string(prev_line)
+            if (
+                prev_line_clean
+                and len(prev_line_clean.split()) <= 14
+                and not re.search(r"(location|duration|project|education|experience)", prev_line_clean, re.IGNORECASE)
+                and not _looks_like_org_line(prev_line_clean)
+            ):
+                title = prev_line_clean
 
         entries.append(
             {
@@ -1808,6 +1833,13 @@ def _extract_phone_from_text(text: str) -> str | None:
     if not match:
         return None
     return _clean_string(match.group(1))
+
+
+def _extract_email_from_text(text: str) -> str | None:
+    match = EMAIL_PATTERN.search(text or "")
+    if not match:
+        return None
+    return _clean_string(match.group(0))
 
 
 def _clean_date_string(value: Any) -> str | None:

@@ -249,6 +249,101 @@ Bachelor of Computer Science from Osmania University in 2008.
         self.assertIn("Bachelor", str(education[0].get("degree") or ""))
         self.assertIn("Osmania University", str(education[0].get("institution") or ""))
 
+    def test_noisy_llm_skills_fall_back_to_cleaner_extraction(self) -> None:
+        parsed = {
+            "skills": [
+                "Role: Sr.JAVA DEVELOPER Responsibilities:",
+                "Developed technical specifications for various back end modules from business requirements.",
+                "Involved in consuming and producing Restful web services using JAX-RS.",
+                "JAVA",
+            ],
+            "experience_entries": [
+                {
+                    "company": "General Motors",
+                    "title": "JAVA J2EE Developer",
+                    "location": "Detroit, Michigan",
+                    "start_date": "2013-01",
+                    "end_date": "2014-03",
+                    "is_current": False,
+                    "description": None,
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ],
+        }
+        raw_text = """
+TECHNICAL SKILLS:
+Programming Languages: JAVA, J2EE, SQL
+Web Services: SOAP, REST
+PROFESSIONAL EXPERIENCE:
+General Motors – Detroit, Michigan Jan2013-Mar2014
+Role: JAVA J2EE Developer
+Environment: Core Java, J2EE, SQL, REST Web Services
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        skills = normalized.get("skills", [])
+        self.assertIn("JAVA", skills)
+        self.assertIn("J2EE", skills)
+        self.assertIn("SQL", skills)
+        self.assertNotIn("Role: Sr.JAVA DEVELOPER Responsibilities:", skills)
+        self.assertFalse(
+            any("Developed technical specifications" in str(item) for item in skills)
+        )
+
+    def test_filters_location_timeline_and_role_fragments_from_skills(self) -> None:
+        parsed = {
+            "skills": [
+                "California State Health Department (PHI)",
+                "San Jose, CA Mar2014 – Till Date",
+                "Role: Sr.JAVA DEVELOPER Responsibilities:",
+                "JAVA",
+                "J2EE",
+                "SQL",
+            ]
+        }
+        raw_text = """
+TECHNICAL SKILLS:
+Programming Languages: JAVA, J2EE, SQL
+PROFESSIONAL EXPERIENCE:
+California State Health Department (PHI), San Jose, CA Mar2014 – Till Date
+Role: Sr.JAVA DEVELOPER Responsibilities:
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        skills = normalized.get("skills", [])
+        self.assertIn("JAVA", skills)
+        self.assertIn("J2EE", skills)
+        self.assertIn("SQL", skills)
+        self.assertFalse(any("San Jose" in str(item) for item in skills))
+        self.assertFalse(any("Till Date" in str(item) for item in skills))
+        self.assertFalse(any("Role:" in str(item) for item in skills))
+
+    def test_filters_prose_like_skill_fragments(self) -> None:
+        parsed = {
+            "skills": [
+                "automation tools using a ColdFusion front end.",
+                "management of multi-step user input flows.",
+                "Strong understanding",
+                "Java",
+                "Spring",
+                "Hibernate",
+            ],
+            "experience_entries": [],
+        }
+        raw_text = """
+TECHNICAL SKILLS:
+Programming Languages: Java, SQL
+Application Frameworks: Spring, Hibernate
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        skills = [str(item).lower() for item in normalized.get("skills", [])]
+        self.assertIn("java", skills)
+        self.assertIn("spring", skills)
+        self.assertIn("hibernate", skills)
+        self.assertNotIn("automation tools using a coldfusion front end.", skills)
+        self.assertNotIn("management of multi-step user input flows.", skills)
+
 
 if __name__ == "__main__":
     unittest.main()

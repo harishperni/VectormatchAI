@@ -416,6 +416,15 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         result.get("skills", []),
         result.get("certifications", []),
     )
+    if _skills_need_fallback(result.get("skills", [])):
+        extracted_skills = _extract_skills_from_text(raw_text, result.get("experience_entries", []))
+        environment_skills = _extract_environment_skills_from_text(raw_text)
+        combined = _postprocess_skills(
+            [*extracted_skills, *environment_skills],
+            result.get("certifications", []),
+        )
+        if combined:
+            result["skills"] = combined
 
     if result["professional_summary"] is None:
         result["professional_summary"] = _extract_professional_summary_from_text(raw_text)
@@ -1821,6 +1830,9 @@ def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
         cleaned_token = _strip_skill_category_prefix(token)
         if not cleaned_token:
             continue
+        cleaned_token = cleaned_token.strip(" \t\r\n.;:()[]{}")
+        if not cleaned_token:
+            continue
 
         lowered = cleaned_token.lower()
         if re.search(r"\b(certification|certified|certificate|credential)\b", lowered):
@@ -1853,6 +1865,12 @@ def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
             continue
         if re.fullmatch(r"\d+(?:\.\d+|\.x|x)?", lowered):
             continue
+        if _looks_like_non_skill_phrase(cleaned_token):
+            continue
+        if _is_generic_non_skill_token(cleaned_token):
+            continue
+        if _looks_like_sentence_fragment(cleaned_token):
+            continue
         if cert_names and any(lowered == name or lowered in name or name in lowered for name in cert_names):
             continue
         filtered.append(cleaned_token)
@@ -1866,11 +1884,199 @@ def _strip_skill_category_prefix(value: str) -> str | None:
         return None
 
     stripped = re.sub(
-        r"(?i)^\s*(programming languages?|j2ee technologies?|web technologies?|databases?|xml technologies?|web services?|methodologies?|operating systems?|application frameworks?|version control|other tools?|tools?|ides?|application\/web server)\s*:\s*",
+        r"(?i)^\s*(programming languages?|j2ee technologies?|web technologies?|databases?|xml technologies?|web services?|methodologies?|operating systems?|application frameworks?|version control(?:\s+tools?)?|other tools?|tools?|ides?|application\/web server)\s*:\s*",
         "",
         cleaned,
     ).strip()
     return stripped or None
+
+
+def _looks_like_non_skill_phrase(token: str) -> bool:
+    lowered = token.lower().strip()
+    if not lowered:
+        return True
+
+    words = [w for w in re.split(r"\s+", lowered) if w]
+    if len(words) >= 8:
+        return True
+    if len(token) > 60:
+        return True
+
+    if re.search(r"(?i)\b(responsibilities|developed|worked|involved|designed|implemented|managed|provided|participated|coordinated)\b", token):
+        return True
+    if re.search(r"(?i)\b(environment|technologies used|role)\b", token):
+        return True
+    if re.search(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\s*\d{2,4}\b", token):
+        return True
+    if re.search(r"(?i)\b(till date|present|current)\b", token):
+        return True
+    if re.search(r"\b(19|20)\d{2}\b", token):
+        return True
+    if re.search(r"(?i)\b(role\s*:|responsibilities\s*:)\b", token):
+        return True
+    if re.search(r"(?i)\b[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)\b", token):
+        return True
+    if re.fullmatch(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}", token.strip()):
+        lower_token = token.lower()
+        tech_hints = {
+            "power",
+            "automate",
+            "java",
+            "spring",
+            "oracle",
+            "sql",
+            "hibernate",
+            "servlet",
+            "maven",
+            "jenkins",
+            "kafka",
+            "hadoop",
+            "android",
+            "react",
+            "angular",
+            "python",
+            "scala",
+            "aws",
+            "agile",
+            "struts",
+            "jquery",
+            "javascript",
+            "typescript",
+        }
+        if not any(hint in lower_token for hint in tech_hints):
+            return True
+    if re.search(r"\b[A-Za-z]+\s*[,;]\s*[A-Za-z]+\s*[,;]\s*[A-Za-z]+\b", token):
+        # likely sentence/list fragment rather than a single skill.
+        return True
+
+    return False
+
+
+def _is_generic_non_skill_token(token: str) -> bool:
+    lowered = token.lower().strip()
+    if not lowered:
+        return True
+
+    generic_exact = {
+        "role",
+        "responsibilities",
+        "responsibility",
+        "systems",
+        "system",
+        "management",
+        "strong understanding",
+        "understanding",
+        "effective",
+        "techniques",
+        "best practices",
+        "and networking",
+        "ca",
+    }
+    if lowered in generic_exact:
+        return True
+
+    if re.fullmatch(r"[A-Z]{2}", token.strip()):
+        return True
+
+    org_markers = {
+        "department",
+        "insurance",
+        "bank",
+        "university",
+        "college",
+        "hospital",
+        "state health",
+        "motors",
+        "railroad",
+    }
+    if any(marker in lowered for marker in org_markers):
+        return True
+
+    connectors = {" of ", " and ", " for ", " with ", " in ", " to "}
+    tech_hints = {
+        "java",
+        "spring",
+        "oracle",
+        "sql",
+        "hibernate",
+        "servlet",
+        "maven",
+        "jenkins",
+        "kafka",
+        "hadoop",
+        "android",
+        "react",
+        "angular",
+        "python",
+        "scala",
+        "aws",
+        "rest",
+        "soap",
+        "j2ee",
+        "jdbc",
+        "struts",
+        "jsp",
+        "xml",
+        "json",
+    }
+    if len(lowered.split()) >= 4 and any(conn in f" {lowered} " for conn in connectors):
+        if not any(hint in lowered for hint in tech_hints):
+            return True
+
+    return False
+
+
+def _looks_like_sentence_fragment(token: str) -> bool:
+    lowered = token.lower().strip()
+    if not lowered:
+        return True
+
+    words = [w for w in lowered.split() if w]
+    if len(words) >= 6:
+        tech_hints = {
+            "java", "spring", "oracle", "sql", "hibernate", "servlet", "maven", "jenkins",
+            "kafka", "hadoop", "android", "react", "angular", "python", "scala", "aws",
+            "rest", "soap", "j2ee", "jdbc", "struts", "jsp", "xml", "json", "objective-c",
+        }
+        if not any(h in lowered for h in tech_hints):
+            return True
+
+    if any(v in f" {lowered} " for v in {" using ", " used ", " worked ", " developed ", " designed ", " implemented ", " involved ", " reviewed "}):
+        return True
+    if lowered.endswith("."):
+        return True
+    return False
+
+
+def _skills_need_fallback(skills: Any) -> bool:
+    if not isinstance(skills, list) or not skills:
+        return True
+
+    noisy = 0
+    hard_noise = 0
+    for item in skills:
+        if not isinstance(item, str):
+            noisy += 1
+            continue
+        if re.search(r"(?i)\b(role\s*:|responsibilities\s*:)\b", item):
+            return True
+        if re.search(r"(?i)\b(till date|present|current)\b", item):
+            return True
+        if re.search(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\s*\d{2,4}\b", item):
+            return True
+        if re.search(r"\b(19|20)\d{2}\b", item):
+            return True
+        if re.search(r"(?i)\b[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)\b", item):
+            return True
+        if _looks_like_non_skill_phrase(item):
+            noisy += 1
+            hard_noise += 1
+        if _looks_like_sentence_fragment(item):
+            noisy += 1
+            hard_noise += 1
+
+    ratio = noisy / float(len(skills))
+    return ratio >= 0.20 or hard_noise >= 3
 
 
 def _split_skill_candidate(value: str) -> list[str]:

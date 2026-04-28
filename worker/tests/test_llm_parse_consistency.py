@@ -6,6 +6,8 @@ from app.llm_parse import _normalize_llm_parse_output_v2
 
 
 class LlmParseConsistencyTests(unittest.TestCase):
+    """Regression tests for parser normalization and fallback stability."""
+
     def test_recovers_core_sections_when_model_output_is_empty(self) -> None:
         parsed: dict = {}
         raw_text = """

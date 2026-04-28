@@ -1884,7 +1884,7 @@ def _strip_skill_category_prefix(value: str) -> str | None:
         return None
 
     stripped = re.sub(
-        r"(?i)^\s*(programming languages?|j2ee technologies?|web technologies?|databases?|xml technologies?|web services?|methodologies?|operating systems?|application frameworks?|version control(?:\s+tools?)?|other tools?|tools?|ides?|application\/web server)\s*:\s*",
+        r"(?i)^\s*(programming languages?|j2ee technologies?|web technologies?|databases?|xml technologies?|web services?|methodologies?|operating systems?|application frameworks?|version control(?:\s+tools?)?|other tools?|tools?|ides?|application\/web server|environment|technologies used)\s*:\s*",
         "",
         cleaned,
     ).strip()

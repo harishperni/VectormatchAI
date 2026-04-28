@@ -182,6 +182,7 @@ Bachelor of Computer Science
                 "Web Services: SOAP",
                 "Databases: Oracle",
                 "Methodologies: Agile",
+                "Environment: Core JAVA",
                 "2.x",
             ]
         }
@@ -191,6 +192,7 @@ Bachelor of Computer Science
         self.assertIn("SOAP", skills)
         self.assertIn("Oracle", skills)
         self.assertIn("Agile", skills)
+        self.assertIn("Core JAVA", skills)
         self.assertNotIn("2.x", skills)
 
     def test_fallback_recovery_fills_missing_descriptions(self) -> None:

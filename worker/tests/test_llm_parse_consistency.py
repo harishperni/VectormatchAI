@@ -370,6 +370,82 @@ Application Frameworks: Spring, Hibernate
         self.assertIn("MyCustomInternalTool", unknown)
         self.assertIn("FooPlatformX", unknown)
 
+    def test_filters_client_location_noise_and_recovers_role_title(self) -> None:
+        parsed = {
+            "skills": ["Client", "Location", "Pittsburgh", "ServiceNow", "HP ALM", "Over time"],
+            "current_last_job": "Environment\\Tools: SDLC Waterfall, HP ALM",
+            "experience_entries": [
+                {
+                    "title": None,
+                    "company": "Role:Lead Business Systems Analyst",
+                    "start_date": "2016-08",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "location": None,
+                    "description": "Environment\\Tools: Service Now, HP ALM",
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ],
+        }
+
+        normalized = _normalize_llm_parse_output_v2(parsed, "WORK EXPERIENCE")
+        skills = normalized.get("skills", [])
+        self.assertIn("servicenow", skills)
+        self.assertIn("hp alm", skills)
+        self.assertNotIn("client", skills)
+        self.assertNotIn("location", skills)
+        self.assertNotIn("over time", skills)
+
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("title"), "Lead Business Systems Analyst")
+        self.assertIsNone(entries[0].get("company"))
+        self.assertEqual(normalized.get("current_last_job"), "Lead Business Systems Analyst")
+
+    def test_extracts_inline_environment_tools_skills(self) -> None:
+        parsed = {"skills": []}
+        raw_text = (
+            "Responsibilities: ... Environment\\Tools: Mainframes, SDLC Waterfall, HP ALM, "
+            "MS Visio, MS Office Suite, SharePoint, Snagit, SAP, HPQC, QTP. Role: Business Analyst"
+        )
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        skills = normalized.get("skills", [])
+        self.assertIn("mainframes", skills)
+        self.assertIn("sharepoint", skills)
+        self.assertIn("sap", skills)
+        self.assertIn("hpqc", skills)
+        self.assertIn("qtp", skills)
+
+    def test_uses_role_line_when_current_last_job_is_company_name(self) -> None:
+        parsed = {
+            "current_last_job": "Tata Consultancy Services Ltd.",
+            "experience_entries": [],
+        }
+        raw_text = "Role:Lead Business Systems Analyst August 2016- Till Now"
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        self.assertEqual(normalized.get("current_last_job"), "Lead Business Systems Analyst")
+
+    def test_removes_client_location_from_skills_and_strips_technologies_like(self) -> None:
+        parsed = {
+            "skills": [
+                "technologies like Mainframes",
+                "PNC Financial Services",
+                "Pittsburgh",
+                "ServiceNow",
+            ]
+        }
+        raw_text = """
+Client: PNC Financial Services
+Location: Pittsburgh, PA
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        skills = normalized.get("skills", [])
+        self.assertIn("mainframes", skills)
+        self.assertIn("servicenow", skills)
+        self.assertNotIn("pnc financial services", skills)
+        self.assertNotIn("pittsburgh", skills)
+
 
 if __name__ == "__main__":
     unittest.main()

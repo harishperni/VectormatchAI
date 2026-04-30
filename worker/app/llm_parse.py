@@ -430,6 +430,10 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
             result["experience_entries"] = sort_experience_entries(merged_entries)
         elif fallback_score > current_score:
             result["experience_entries"] = sort_experience_entries(fallback_entries)
+    result["experience_entries"] = _repair_experience_entries(
+        result.get("experience_entries", []),
+        current_last_job=result.get("current_last_job"),
+    )
 
     result["projects"] = [item for item in result["projects"] if not _is_empty_project(item)]
     result["education"] = [item for item in result["education"] if not _is_empty_education(item)]
@@ -461,6 +465,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         result.get("skills", []),
         result.get("certifications", []),
     )
+    result["skills"] = _remove_client_location_skill_leakage(result.get("skills", []), raw_text)
     if _skills_need_fallback(result.get("skills", [])):
         extracted_skills = _extract_skills_from_text(raw_text, result.get("experience_entries", []))
         environment_skills = _extract_environment_skills_from_text(raw_text)
@@ -470,6 +475,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         )
         if combined:
             result["skills"] = combined
+            result["skills"] = _remove_client_location_skill_leakage(result.get("skills", []), raw_text)
     result["skills_raw"] = _unique_clean_strings(result.get("skills", []))
     canonical_skills, unknown_tokens = canonicalize_skill_tokens_with_unknowns(result.get("skills", []))
     result["skills"] = canonical_skills
@@ -488,8 +494,18 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     if result["highest_degree"] is None:
         result["highest_degree"] = derive_highest_degree(result["education"])
 
+    if (
+        isinstance(result.get("current_last_job"), str)
+        and re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", result["current_last_job"])
+    ):
+        result["current_last_job"] = None
+
     if result["current_last_job"] is None:
         result["current_last_job"] = derive_current_last_job(result["experience_entries"])
+    if _looks_like_company_label(result.get("current_last_job")):
+        inferred_role = _extract_current_role_from_text(raw_text)
+        if inferred_role:
+            result["current_last_job"] = inferred_role
     if result["willing_to_relocate"] is None:
         result["willing_to_relocate"] = _infer_willing_to_relocate_from_text(raw_text)
 
@@ -589,9 +605,19 @@ def _normalize_experience_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
         if inferred_is_current is None and inferred_current:
             inferred_is_current = True
 
+    raw_company = _clean_string(entry.get("company"))
+    normalized_company = _normalize_company_string(raw_company)
+    normalized_title = _clean_string(entry.get("title"))
+    if (
+        not normalized_title
+        and raw_company
+        and re.match(r"(?i)^\s*role\s*:", raw_company)
+    ):
+        normalized_title = _clean_string(re.sub(r"(?i)^\s*role\s*:\s*", "", raw_company))
+
     return {
-        "company": _normalize_company_string(entry.get("company")),
-        "title": _clean_string(entry.get("title")),
+        "company": normalized_company,
+        "title": normalized_title,
         "location": _clean_string(entry.get("location")),
         "start_date": start_date,
         "end_date": end_date,
@@ -612,6 +638,8 @@ def _normalize_company_string(value: Any) -> str | None:
 
     # Drop label-only fragments that frequently appear in malformed OCR/LLM output.
     if re.fullmatch(r"(?i)\s*(location|duration)\s*:?\s*", company):
+        return None
+    if re.match(r"(?i)^\s*role\s*:", company):
         return None
 
     # Remove date range and explicit labels when they bleed into company.
@@ -653,13 +681,25 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any) -> list[d
 
     normalized_entries = [entry for entry in entries if isinstance(entry, dict)]
     normalized_current_title = _clean_string(current_last_job)
+    if normalized_current_title and re.match(
+        r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]",
+        normalized_current_title,
+    ):
+        normalized_current_title = None
     current_filled = False
 
     repaired: list[dict[str, Any]] = []
     for entry in normalized_entries:
         item = dict(entry)
-        item["company"] = _normalize_company_string(item.get("company"))
+        raw_company = _clean_string(item.get("company"))
+        item["company"] = _normalize_company_string(raw_company)
         item["title"] = _clean_string(item.get("title"))
+        if item["title"] and re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", item["title"]):
+            item["title"] = None
+        if not item.get("title") and raw_company and re.match(r"(?i)^\s*role\s*:", raw_company):
+            derived_title = _clean_string(re.sub(r"(?i)^\s*role\s*:\s*", "", raw_company))
+            if derived_title:
+                item["title"] = derived_title
         item["location"] = _clean_string(item.get("location")) or _extract_location_fragment(
             _clean_string(entry.get("company")) or ""
         )
@@ -961,7 +1001,7 @@ def _extract_environment_skills_from_text(text: str) -> list[str]:
     skills: list[str] = []
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     header_pattern = re.compile(
-        r"(?i)^(environment|tech\s*stack|tools\s*used|technologies)\s*:"
+        r"(?i)^(environment(?:\s*(?:\\|/)\s*tools)?|tech\s*stack|tools\s*used|technologies)\s*:"
     )
 
     for line in lines:
@@ -984,7 +1024,62 @@ def _extract_environment_skills_from_text(text: str) -> list[str]:
                 continue
             skills.append(token)
 
+    # Also capture inline blocks when OCR/LLM flattens multiple fields into one line:
+    # "... Responsibilities ... Environment\Tools: A, B, C. Role: ..."
+    inline_pattern = re.compile(
+        r"(?i)\b(environment(?:\s*(?:\\|/)\s*tools)?|tech\s*stack|tools\s*used|technologies)\s*:\s*([^\n]+)"
+    )
+    stop_pattern = re.compile(
+        r"(?i)\b(role|project name|client|location|responsibilities)\s*:"
+    )
+    for match in inline_pattern.finditer(text):
+        payload = match.group(2).strip()
+        if not payload:
+            continue
+        stop_match = stop_pattern.search(payload)
+        if stop_match:
+            payload = payload[: stop_match.start()].strip()
+        payload = payload.split(".")[0].strip()
+        if not payload:
+            continue
+        for part in re.split(r",|;|\|", payload):
+            token = _clean_string(part)
+            if not token:
+                continue
+            token = re.sub(r"^[\-\u2022•\s]+", "", token).strip()
+            token = re.sub(r"[.]+$", "", token).strip()
+            if not token:
+                continue
+            if token.lower() in {"environment", "tools", "technologies"}:
+                continue
+            skills.append(token)
+
     return _unique_clean_strings(skills)
+
+
+def _extract_current_role_from_text(text: str) -> str | None:
+    date_cut = re.compile(
+        r"(?i)\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s*\d{0,4}.*$|\s+\d{4}.*$"
+    )
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not re.match(r"(?i)^role\s*:", stripped):
+            continue
+        title_part = re.sub(r"(?i)^role\s*:\s*", "", stripped).strip()
+        title_part = date_cut.sub("", title_part).strip(" -")
+        title = _clean_string(title_part)
+        if title:
+            return title
+    return None
+
+
+def _looks_like_company_label(value: str | None) -> bool:
+    if not value:
+        return False
+    lower = value.lower().strip()
+    return bool(
+        re.search(r"\b(ltd|llc|inc|corp|corporation|consultancy|services)\b", lower)
+    )
 
 
 def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
@@ -1998,7 +2093,45 @@ def _strip_skill_category_prefix(value: str) -> str | None:
         "",
         cleaned,
     ).strip()
+    stripped = re.sub(r"(?i)^\s*technolog(?:y|ies)\s+like\s+", "", stripped).strip()
     return stripped or None
+
+
+def _remove_client_location_skill_leakage(skills: Any, raw_text: str) -> list[str]:
+    if not isinstance(skills, list):
+        return []
+
+    blocked: set[str] = set()
+    for line in raw_text.splitlines():
+        text = _clean_string(line)
+        if not text:
+            continue
+        client_match = re.match(r"(?i)^client\s*:\s*(.+)$", text)
+        if client_match:
+            client = _clean_string(client_match.group(1))
+            if client:
+                blocked.add(client.lower())
+            continue
+        location_match = re.match(r"(?i)^location\s*:\s*(.+)$", text)
+        if location_match:
+            loc = _clean_string(location_match.group(1))
+            if loc:
+                blocked.add(loc.lower())
+                city = _clean_string(loc.split(",")[0])
+                if city:
+                    blocked.add(city.lower())
+
+    cleaned_skills: list[str] = []
+    for token in skills:
+        if not isinstance(token, str):
+            continue
+        normalized = token.strip().lower()
+        if not normalized:
+            continue
+        if normalized in blocked:
+            continue
+        cleaned_skills.append(token)
+    return _unique_clean_strings(cleaned_skills)
 
 
 def _looks_like_non_skill_phrase(token: str) -> bool:
@@ -2023,6 +2156,8 @@ def _looks_like_non_skill_phrase(token: str) -> bool:
     if re.search(r"\b(19|20)\d{2}\b", token):
         return True
     if re.search(r"(?i)\b(role\s*:|responsibilities\s*:)\b", token):
+        return True
+    if re.search(r"(?i)^\s*(client|location|project name)\s*:", token):
         return True
     if re.search(r"(?i)\b[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)\b", token):
         return True
@@ -2071,6 +2206,10 @@ def _is_generic_non_skill_token(token: str) -> bool:
         "role",
         "responsibilities",
         "responsibility",
+        "client",
+        "location",
+        "project",
+        "project name",
         "systems",
         "system",
         "management",
@@ -2080,6 +2219,8 @@ def _is_generic_non_skill_token(token: str) -> bool:
         "techniques",
         "best practices",
         "and networking",
+        "over time",
+        "defect",
         "ca",
     }
     if lowered in generic_exact:
@@ -2375,7 +2516,10 @@ def derive_current_last_job(experience_entries: list[dict[str, Any]]) -> str | N
     for entry in sorted_entries:
         title = entry.get("title")
         if isinstance(title, str) and title.strip():
-            return title.strip()
+            cleaned = title.strip()
+            if re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", cleaned):
+                continue
+            return cleaned
     return None
 
 

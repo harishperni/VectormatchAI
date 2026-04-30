@@ -190,11 +190,11 @@ Bachelor of Computer Science
         }
         normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
         skills = normalized.get("skills", [])
-        self.assertIn("JAVA", skills)
-        self.assertIn("SOAP", skills)
-        self.assertIn("Oracle", skills)
-        self.assertIn("Agile", skills)
-        self.assertIn("Core JAVA", skills)
+        self.assertIn("java", skills)
+        self.assertIn("soap", skills)
+        self.assertIn("oracle", skills)
+        self.assertIn("agile", skills)
+        self.assertIn("core java", skills)
         self.assertNotIn("2.x", skills)
 
     def test_fallback_recovery_fills_missing_descriptions(self) -> None:
@@ -287,9 +287,9 @@ Environment: Core Java, J2EE, SQL, REST Web Services
 
         normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
         skills = normalized.get("skills", [])
-        self.assertIn("JAVA", skills)
-        self.assertIn("J2EE", skills)
-        self.assertIn("SQL", skills)
+        self.assertIn("java", skills)
+        self.assertIn("j2ee", skills)
+        self.assertIn("sql", skills)
         self.assertNotIn("Role: Sr.JAVA DEVELOPER Responsibilities:", skills)
         self.assertFalse(
             any("Developed technical specifications" in str(item) for item in skills)
@@ -316,9 +316,9 @@ Role: Sr.JAVA DEVELOPER Responsibilities:
 
         normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
         skills = normalized.get("skills", [])
-        self.assertIn("JAVA", skills)
-        self.assertIn("J2EE", skills)
-        self.assertIn("SQL", skills)
+        self.assertIn("java", skills)
+        self.assertIn("j2ee", skills)
+        self.assertIn("sql", skills)
         self.assertFalse(any("San Jose" in str(item) for item in skills))
         self.assertFalse(any("Till Date" in str(item) for item in skills))
         self.assertFalse(any("Role:" in str(item) for item in skills))
@@ -347,6 +347,28 @@ Application Frameworks: Spring, Hibernate
         self.assertIn("hibernate", skills)
         self.assertNotIn("automation tools using a coldfusion front end.", skills)
         self.assertNotIn("management of multi-step user input flows.", skills)
+
+    def test_emits_raw_and_canonical_skills(self) -> None:
+        parsed = {
+            "skills": ["Java Script", "Node JS", "AWS (Amazon Web Services)", "Hibernate ORM"]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        self.assertIn("skills_raw", normalized)
+        self.assertIn("Java Script", normalized.get("skills_raw", []))
+        self.assertIn("javascript", normalized.get("skills", []))
+        self.assertIn("nodejs", normalized.get("skills", []))
+        self.assertIn("aws", normalized.get("skills", []))
+        self.assertIn("hibernate", normalized.get("skills", []))
+        self.assertIn("skills_unknown_tokens", normalized)
+
+    def test_tracks_unknown_skill_tokens(self) -> None:
+        parsed = {
+            "skills": ["Java Script", "MyCustomInternalTool", "FooPlatformX"]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        unknown = normalized.get("skills_unknown_tokens", [])
+        self.assertIn("MyCustomInternalTool", unknown)
+        self.assertIn("FooPlatformX", unknown)
 
 
 if __name__ == "__main__":

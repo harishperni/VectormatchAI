@@ -23,6 +23,7 @@ from app.llm_parse import (
     _extract_skills_from_text,
     _extract_volunteering_from_text,
     calculate_experience_years_from_entries,
+    canonicalize_skill_tokens_with_unknowns,
     count_date_ranges_in_text,
     derive_current_last_job,
     derive_primary_domain,
@@ -381,6 +382,13 @@ def _merge_with_recovery(primary: dict[str, Any], recovered: dict[str, Any]) -> 
 
 def build_final_payload(strict_parsed: dict[str, Any], normalized_text: str) -> dict[str, Any]:
     final_payload = dict(strict_parsed)
+    raw_skills = final_payload.get("skills_raw")
+    if not isinstance(raw_skills, list) or not raw_skills:
+        raw_skills = final_payload.get("skills", []) if isinstance(final_payload.get("skills"), list) else []
+    final_payload["skills_raw"] = [str(item) for item in raw_skills if isinstance(item, str)]
+    canonical_skills, unknown_skills = canonicalize_skill_tokens_with_unknowns(final_payload["skills_raw"])
+    final_payload["skills"] = canonical_skills
+    final_payload["skills_unknown_tokens"] = unknown_skills
 
     parsed_experience_years = calculate_experience_years_from_entries(
         strict_parsed.get("experience_entries", [])
@@ -402,7 +410,7 @@ def build_final_payload(strict_parsed: dict[str, Any], normalized_text: str) -> 
     final_payload["primary_domain"] = derive_primary_domain(
         strict_parsed.get("current_last_job"),
         strict_parsed.get("experience_entries", []),
-        strict_parsed.get("skills", []),
+        final_payload.get("skills", []),
     )
     final_payload["seniority_level"] = derive_seniority_level(
         strict_parsed.get("current_last_job")

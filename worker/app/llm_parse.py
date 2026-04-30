@@ -142,6 +142,49 @@ MONTH_MAP = {
     "dec": 12, "december": 12,
 }
 
+SKILL_ALIAS_MAP = {
+    "js": "javascript",
+    "java script": "javascript",
+    "javascript": "javascript",
+    "ts": "typescript",
+    "node js": "nodejs",
+    "node.js": "nodejs",
+    "nodejs": "nodejs",
+    "react js": "react",
+    "reactjs": "react",
+    "angular js": "angularjs",
+    "angular.js": "angularjs",
+    "mongo db": "mongodb",
+    "mongo": "mongodb",
+    "aws (amazon web services)": "aws",
+    "aws amazon web services": "aws",
+    "amazon web services": "aws",
+    "rest web services": "rest",
+    "soap web services": "soap",
+    "hibernate orm": "hibernate",
+    "spring orm": "spring",
+    "junit": "junit",
+    "j unit": "junit",
+    "spring framework": "spring",
+    "spring boot framework": "spring boot",
+    "restful web services": "rest",
+    "soap restful web services": "soap",
+    "amazon web service": "aws",
+    "git hub": "github",
+    "git-hub": "github",
+    "power shell": "powershell",
+    "c sharp": "c#",
+    "post gre sql": "postgresql",
+    "postgre sql": "postgresql",
+    "my sql": "mysql",
+    "mongo db": "mongodb",
+    "ms sql": "sql server",
+    "mssql": "sql server",
+    "web sphere": "websphere",
+    "web logic": "weblogic",
+    "micro services": "microservices",
+}
+
 PRESENT_WORDS = {
     "present",
     "current",
@@ -307,6 +350,8 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         "portfolio_url": clean(parsed.get("portfolio_url")),
         "professional_summary": clean(parsed.get("professional_summary")),
         "skills": _unique_clean_strings(parsed.get("skills", [])) if isinstance(parsed.get("skills"), list) else [],
+        "skills_raw": [],
+        "skills_unknown_tokens": [],
         "languages": _unique_clean_strings(parsed.get("languages", [])) if isinstance(parsed.get("languages"), list) else [],
         "highest_degree": clean(parsed.get("highest_degree")),
         "education": [],
@@ -425,6 +470,10 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         )
         if combined:
             result["skills"] = combined
+    result["skills_raw"] = _unique_clean_strings(result.get("skills", []))
+    canonical_skills, unknown_tokens = canonicalize_skill_tokens_with_unknowns(result.get("skills", []))
+    result["skills"] = canonical_skills
+    result["skills_unknown_tokens"] = unknown_tokens
 
     if result["professional_summary"] is None:
         result["professional_summary"] = _extract_professional_summary_from_text(raw_text)
@@ -445,6 +494,67 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         result["willing_to_relocate"] = _infer_willing_to_relocate_from_text(raw_text)
 
     return result
+
+
+def _normalize_skill_lookup_key(value: str) -> str:
+    token = value.lower()
+    token = re.sub(r"[^a-z0-9+#./ -]+", " ", token)
+    token = re.sub(r"\s+", " ", token).strip()
+    return token
+
+
+def _canonicalize_skill_fallback(token: str) -> str:
+    # Reduce common parser noise without requiring explicit aliases for every skill.
+    cleaned = token.strip(" .,:;()[]{}")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\bframeworks?\b", "framework", cleaned)
+    cleaned = re.sub(r"\btechnologies?\b", "technology", cleaned)
+    cleaned = re.sub(r"\bweb services?\b", "web service", cleaned)
+
+    # Unify obvious spaced variants.
+    cleaned = cleaned.replace("java script", "javascript")
+    cleaned = cleaned.replace("node js", "nodejs")
+    cleaned = cleaned.replace("react js", "react")
+    cleaned = cleaned.replace("angular js", "angularjs")
+    cleaned = cleaned.replace("power shell", "powershell")
+    cleaned = cleaned.replace("my sql", "mysql")
+    cleaned = cleaned.replace("mongo db", "mongodb")
+    cleaned = cleaned.replace("web sphere", "websphere")
+    cleaned = cleaned.replace("web logic", "weblogic")
+    cleaned = cleaned.replace("micro services", "microservices")
+
+    return cleaned.strip()
+
+
+def canonicalize_skill_tokens_with_unknowns(skills: Any) -> tuple[list[str], list[str]]:
+    if not isinstance(skills, list):
+        return [], []
+    canonical: list[str] = []
+    unknown_raw: list[str] = []
+    for skill in skills:
+        if not isinstance(skill, str):
+            continue
+        cleaned = _clean_string(skill)
+        if not cleaned:
+            continue
+        key = _normalize_skill_lookup_key(cleaned)
+        if not key:
+            continue
+        token = SKILL_ALIAS_MAP.get(key)
+        if token is None:
+            token = _canonicalize_skill_fallback(key)
+            token = SKILL_ALIAS_MAP.get(token, token)
+        if token and token not in canonical:
+            canonical.append(token)
+        if key == token and len(key) >= 3 and key not in SKILL_ALIAS_MAP:
+            if cleaned not in unknown_raw:
+                unknown_raw.append(cleaned)
+    return canonical, unknown_raw
+
+
+def canonicalize_skill_tokens(skills: Any) -> list[str]:
+    canonical, _ = canonicalize_skill_tokens_with_unknowns(skills)
+    return canonical
 
 
 def _normalize_education_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:

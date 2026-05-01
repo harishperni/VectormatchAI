@@ -461,6 +461,8 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["phone"] = _normalize_phone_value(result.get("phone"), raw_text)
     if result["email"] is None:
         result["email"] = _extract_email_from_text(raw_text)
+    if result.get("full_name") is None:
+        result["full_name"] = _extract_full_name_from_top(raw_text)
     result["skills"] = _postprocess_skills(
         result.get("skills", []),
         result.get("certifications", []),
@@ -499,9 +501,18 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         and re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", result["current_last_job"])
     ):
         result["current_last_job"] = None
+    if (
+        isinstance(result.get("current_last_job"), str)
+        and re.search(r"(?i)\b(pmp\s*expiration|certification|pmp number)\b", result["current_last_job"])
+    ):
+        result["current_last_job"] = None
 
     if result["current_last_job"] is None:
         result["current_last_job"] = derive_current_last_job(result["experience_entries"])
+    if result["current_last_job"] is None:
+        inferred_role = _extract_current_role_from_text(raw_text)
+        if inferred_role:
+            result["current_last_job"] = inferred_role
     if _looks_like_company_label(result.get("current_last_job")):
         inferred_role = _extract_current_role_from_text(raw_text)
         if inferred_role:
@@ -517,6 +528,17 @@ def _normalize_skill_lookup_key(value: str) -> str:
     token = re.sub(r"[^a-z0-9+#./ -]+", " ", token)
     token = re.sub(r"\s+", " ", token).strip()
     return token
+
+
+def _has_version_marker(token: str) -> bool:
+    # Preserve versioned skills as distinct tokens:
+    # e.g. "ms visio v14.0", "oracle 11g", "servlets 2.5", "jsp v2.2"
+    return bool(
+        re.search(
+            r"(?i)\b(v\d+(?:\.\d+){0,2}|\d+(?:\.\d+){1,2}[a-z]?|\d+[a-z])\b",
+            token,
+        )
+    )
 
 
 def _canonicalize_skill_fallback(token: str) -> str:
@@ -555,6 +577,14 @@ def canonicalize_skill_tokens_with_unknowns(skills: Any) -> tuple[list[str], lis
             continue
         key = _normalize_skill_lookup_key(cleaned)
         if not key:
+            continue
+        # Do not normalize versioned variants; keep each explicit version.
+        if _has_version_marker(key):
+            token = key
+            if token not in canonical:
+                canonical.append(token)
+            if cleaned not in unknown_raw:
+                unknown_raw.append(cleaned)
             continue
         token = SKILL_ALIAS_MAP.get(key)
         if token is None:
@@ -683,6 +713,11 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any) -> list[d
     normalized_current_title = _clean_string(current_last_job)
     if normalized_current_title and re.match(
         r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]",
+        normalized_current_title,
+    ):
+        normalized_current_title = None
+    if normalized_current_title and re.search(
+        r"(?i)\b(pmp\s*expiration|certification|pmp number)\b",
         normalized_current_title,
     ):
         normalized_current_title = None
@@ -974,7 +1009,7 @@ def _extract_skills_from_text(text: str, entries: list[dict[str, Any]]) -> list[
 
     block = _extract_section_block(
         text,
-        r"^\s*(technical\s+skill(?:-set|s)?|skills?|toolkit|expertise)\s*:?\s*$",
+        r"^\s*((?:technical|techntechnical|technnical|techn\s*technical)\s+skill(?:-set|s)?|skills?|toolkit|expertise)\s*:?\s*$",
         max_lines=80,
     )
     for line in block:
@@ -1063,9 +1098,9 @@ def _extract_current_role_from_text(text: str) -> str | None:
     )
     for line in text.splitlines():
         stripped = line.strip()
-        if not re.match(r"(?i)^role\s*:", stripped):
+        if not re.match(r"(?i)^role(?:\s*[\\/]\s*designation)?\s*:", stripped):
             continue
-        title_part = re.sub(r"(?i)^role\s*:\s*", "", stripped).strip()
+        title_part = re.sub(r"(?i)^role(?:\s*[\\/]\s*designation)?\s*:\s*", "", stripped).strip()
         title_part = date_cut.sub("", title_part).strip(" -")
         title = _clean_string(title_part)
         if title:
@@ -1124,6 +1159,21 @@ def _extract_professional_summary_from_text(text: str) -> str | None:
             merged = _clean_string(" ".join(parts))
             if merged:
                 return merged
+    return None
+
+
+def _extract_full_name_from_top(text: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    for line in lines[:6]:
+        if "@" in line:
+            continue
+        if re.search(r"\b(phone|email|summary|skills|experience|education|certification)\b", line, re.IGNORECASE):
+            continue
+        if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line) and 1 <= len(line.split()) <= 5:
+            return _clean_string(line)
     return None
 
 
@@ -1885,7 +1935,17 @@ def _extract_work_experience_block(text: str) -> str:
             break
 
     if start_idx is None:
-        return text
+        # Gated fallback for resumes that enumerate jobs by repeated
+        # "Client - ..." lines but lack a clean "Experience" section header.
+        client_line_indexes = [
+            i
+            for i, raw in enumerate(lines)
+            if re.match(r"(?i)^\s*client\s*[–\-:]", raw.strip())
+        ]
+        if len(client_line_indexes) >= 2:
+            start_idx = client_line_indexes[0]
+        else:
+            return text
     if end_idx is None:
         end_idx = len(lines)
     return "\n".join(lines[start_idx:end_idx])
@@ -2038,6 +2098,9 @@ def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
         cleaned_token = cleaned_token.strip(" \t\r\n.;:()[]{}")
         if not cleaned_token:
             continue
+        cleaned_token = _normalize_composite_skill_token(cleaned_token)
+        if not cleaned_token:
+            continue
 
         lowered = cleaned_token.lower()
         if re.search(r"\b(certification|certified|certificate|credential)\b", lowered):
@@ -2081,6 +2144,23 @@ def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
         filtered.append(cleaned_token)
 
     return _unique_clean_strings(filtered)
+
+
+def _normalize_composite_skill_token(token: str) -> str | None:
+    lowered = token.lower().strip()
+    if not lowered:
+        return None
+
+    # Collapse composite "application server" phrase noise.
+    if "application server" in lowered:
+        if "weblogic" in lowered or "web logic" in lowered:
+            return "WebLogic"
+        if "jboss" in lowered:
+            return "JBoss"
+        if "tomcat" in lowered:
+            return "Apache Tomcat"
+
+    return token
 
 
 def _strip_skill_category_prefix(value: str) -> str | None:
@@ -2149,7 +2229,7 @@ def _looks_like_non_skill_phrase(token: str) -> bool:
         return True
     if re.search(r"(?i)\b(environment|technologies used|role)\b", token):
         return True
-    if re.search(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\s*\d{2,4}\b", token):
+    if re.search(r"(?i)\b(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|sept\w*|oct\w*|nov\w*|dec\w*)\s*[-,]?\s*\d{2,4}\b", token):
         return True
     if re.search(r"(?i)\b(till date|present|current)\b", token):
         return True
@@ -2203,6 +2283,9 @@ def _is_generic_non_skill_token(token: str) -> bool:
         return True
 
     generic_exact = {
+        "professional experience",
+        "technical skills",
+        "educational documents",
         "role",
         "responsibilities",
         "responsibility",
@@ -2222,6 +2305,8 @@ def _is_generic_non_skill_token(token: str) -> bool:
         "over time",
         "defect",
         "ca",
+        "sandiego",
+        "sysintelliinc",
     }
     if lowered in generic_exact:
         return True
@@ -2518,6 +2603,10 @@ def derive_current_last_job(experience_entries: list[dict[str, Any]]) -> str | N
         if isinstance(title, str) and title.strip():
             cleaned = title.strip()
             if re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", cleaned):
+                continue
+            if re.match(r"(?i)^\s*(technology|technologies|responsibilities|project description|client description)\s*:", cleaned):
+                continue
+            if re.search(r"(?i)\b(pmp\s*expiration|certification|pmp number)\b", cleaned):
                 continue
             return cleaned
     return None

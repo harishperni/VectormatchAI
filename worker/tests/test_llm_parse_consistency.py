@@ -446,6 +446,87 @@ Location: Pittsburgh, PA
         self.assertNotIn("pnc financial services", skills)
         self.assertNotIn("pittsburgh", skills)
 
+    def test_filters_heading_company_date_and_normalizes_composite_server_skill(self) -> None:
+        parsed = {
+            "skills": [
+                "PROFESSIONAL EXPERIENCE",
+                "SYSINTELLIINC",
+                "SANDIEGO",
+                "FEBURARY 2016 – TILL DATE",
+                "Node JS Web Logic Application Server",
+                "Java",
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        skills = normalized.get("skills", [])
+        self.assertIn("java", skills)
+        self.assertIn("weblogic", skills)
+        self.assertNotIn("professional experience", skills)
+        self.assertNotIn("sysintelliinc", skills)
+        self.assertNotIn("sandiego", skills)
+        self.assertNotIn("feburary 2016 till date", skills)
+
+    def test_keeps_versioned_skill_variants_distinct(self) -> None:
+        parsed = {
+            "skills": [
+                "MS Visio V14.0",
+                "MS Visio V15.0",
+                "Jira V6.3",
+                "Jira V6",
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        skills = normalized.get("skills", [])
+        self.assertIn("ms visio v14.0", skills)
+        self.assertIn("ms visio v15.0", skills)
+        self.assertIn("jira v6.3", skills)
+        self.assertIn("jira v6", skills)
+
+    def test_extracts_skills_from_malformed_techntechnical_header(self) -> None:
+        parsed = {"skills": []}
+        raw_text = """
+TECHNTECHNICAL SKILLS:
+DWH technologies: OLAP
+RDBMS: SQL Server 2000/2005/2008 R2, Oracle 10g
+E-Com Frameworks/Web Technologies: VBScripts
+EDUCATION:
+Bachelor of Engineering
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        skills = normalized.get("skills", [])
+        self.assertIn("olap", skills)
+        self.assertIn("vbscripts", skills)
+
+    def test_client_block_fallback_and_pmp_title_guard(self) -> None:
+        parsed = {
+            "current_last_job": "PMP Expiration Date: February 6th 2020",
+            "experience_entries": [],
+            "skills": [],
+            "email": None,
+            "phone": None,
+            "full_name": None,
+        }
+        raw_text = """
+Amar Agarwal
+Amar.srbsa@gmail.com Phone : 201-708-8565
+CERTIFICATION:
+Project Management Professional (PMP)
+PMP Expiration Date: February 6th 2020
+Client – Sanofi, Somerset, NJ (September 2016 – till date)
+Role\\Designation: Project Manager
+Project Description: ...
+Technology: OLAP, SQL Server 2014
+Client – OKI Europe Limited, New Delhi, India (May 2015 – Aug 2016)
+Role\\Designation: Project Manager
+Technology: Business Objects 4.0
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        self.assertEqual(normalized.get("full_name"), "Amar Agarwal")
+        self.assertEqual(normalized.get("email"), "Amar.srbsa@gmail.com")
+        self.assertEqual(normalized.get("phone"), "201-708-8565")
+        self.assertEqual(normalized.get("current_last_job"), "Project Manager")
+        self.assertGreaterEqual(len(normalized.get("experience_entries", [])), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

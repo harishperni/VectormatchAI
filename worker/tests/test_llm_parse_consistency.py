@@ -253,6 +253,24 @@ Bachelor of Computer Science from Osmania University in 2008.
         self.assertIn("Bachelor", str(education[0].get("degree") or ""))
         self.assertIn("Osmania University", str(education[0].get("institution") or ""))
 
+    def test_extracts_multiple_education_lines_without_experience_year_leak(self) -> None:
+        raw_text = """
+Education:
+Master’s in management information system
+Computer Science in Engineering
+Tools/Methods Professional Experience
+Sr. Business Analyst
+University of Texas Dallas, TX Nov 2011-Dec 2013
+""".strip()
+        normalized = _normalize_llm_parse_output_v2({"education": []}, raw_text)
+        education = normalized.get("education", [])
+        self.assertGreaterEqual(len(education), 2)
+        self.assertIn("Master", str(education[0].get("degree") or ""))
+        self.assertIn("management information system", str(education[0].get("field_of_study") or "").lower())
+        self.assertIn("Computer Science in Engineering", str(education[1].get("degree") or ""))
+        self.assertIsNone(education[0].get("end_date"))
+        self.assertIsNone(education[1].get("end_date"))
+
     def test_noisy_llm_skills_fall_back_to_cleaner_extraction(self) -> None:
         parsed = {
             "skills": [

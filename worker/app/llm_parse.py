@@ -943,44 +943,70 @@ def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
     block = _extract_section_block(
         text,
         r"^\s*(education(?: and certifications)?|education & certifications)\s*:?\s*$",
-        max_lines=60,
+        max_lines=30,
     )
     if not block:
         block = lines[-30:]
 
-    joined = " ".join(block)
-    if not joined:
-        return []
+    stop_pattern = re.compile(
+        r"(?i)\b(professional experience|work experience|technical skills|tools/methods|skills)\b"
+    )
+    degree_pattern = re.compile(
+        r"(?i)\b(master(?:['’]s)?|bachelor(?:['’]s)?|ph\.?d|doctorate|associate|diploma)\b"
+    )
+    institution_pattern = re.compile(
+        r"(?i)\b([A-Z][A-Za-z .'-]{3,80}(?:University|Institute|College))\b"
+    )
+    field_pattern = re.compile(
+        r"(?i)\b(?:in|of)\s+([A-Za-z][A-Za-z0-9 &/().'-]{3,80})$"
+    )
 
-    degree_match = re.search(
-        r"(?i)\b(bachelor(?:s)?(?:\s+of\s+[a-z .&/-]+)?|master(?:s)?(?:\s+of\s+[a-z .&/-]+)?|ph\.?d|doctorate)\b",
-        joined,
-    )
-    institution_match = re.search(
-        r"(?i)\bfrom\s+([A-Z][A-Za-z .'-]{3,80}(?:University|Institute|College))\b",
-        joined,
-    )
-    if not institution_match:
-        institution_match = re.search(
-            r"(?i)\b([A-Z][A-Za-z .'-]{3,80}(?:University|Institute|College))\b",
-            joined,
+    entries: list[dict[str, Any]] = []
+    for raw in block:
+        line = _clean_string(re.sub(r"^[•*\-\s]+", "", raw))
+        if not line:
+            continue
+        if stop_pattern.search(line):
+            break
+        if len(line) > 140:
+            continue
+
+        degree_match = degree_pattern.search(line)
+        looks_like_secondary_degree = bool(
+            re.search(r"(?i)\bengineering\b", line) and 2 <= len(line.split()) <= 8
         )
-    year_match = re.search(r"\b(19|20)\d{2}\b", joined)
+        if not degree_match and not looks_like_secondary_degree:
+            continue
 
-    if not (degree_match or institution_match or year_match):
-        return []
+        degree = None
+        field = None
+        if degree_match:
+            degree = _clean_string(degree_match.group(1))
+            field_match = field_pattern.search(line)
+            if field_match:
+                field = _clean_string(field_match.group(1))
+        elif looks_like_secondary_degree:
+            degree = _clean_string(line)
 
-    return [
-        {
-            "institution": _clean_string(institution_match.group(1)) if institution_match else None,
-            "degree": _clean_string(degree_match.group(1)) if degree_match else None,
-            "field_of_study": None,
-            "start_date": None,
-            "end_date": f"{year_match.group(0)}-06" if year_match else None,
-            "gpa": None,
-            "location": None,
-        }
-    ]
+        institution_match = institution_pattern.search(line)
+        year_match = re.search(r"\b(19|20)\d{2}\b", line)
+        end_date = f"{year_match.group(0)}-06" if year_match else None
+
+        entries.append(
+            {
+                "institution": _clean_string(institution_match.group(1)) if institution_match else None,
+                "degree": degree,
+                "field_of_study": field,
+                "start_date": None,
+                "end_date": end_date,
+                "gpa": None,
+                "location": None,
+            }
+        )
+
+    if entries:
+        return entries
+    return []
 
 
 def _has_volunteering_section(text: str) -> bool:

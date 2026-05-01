@@ -486,12 +486,17 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     if result["professional_summary"] is None:
         result["professional_summary"] = _extract_professional_summary_from_text(raw_text)
 
+    if _looks_like_bad_candidate_location(result.get("candidate_location")):
+        result["candidate_location"] = None
+
     if result["candidate_location"] is None:
         for entry in result["experience_entries"]:
             location = entry.get("location")
             if isinstance(location, str) and location.strip():
-                result["candidate_location"] = location.strip()
-                break
+                candidate = location.strip()
+                if not _looks_like_bad_candidate_location(candidate):
+                    result["candidate_location"] = candidate
+                    break
 
     if result["highest_degree"] is None:
         result["highest_degree"] = derive_highest_degree(result["education"])
@@ -671,6 +676,8 @@ def _normalize_company_string(value: Any) -> str | None:
         return None
     if re.match(r"(?i)^\s*role\s*:", company):
         return None
+    if re.match(r"(?i)^\s*(environment|environment\\tools|tools|technology|technologies)\s*:", company):
+        return None
 
     # Remove date range and explicit labels when they bleed into company.
     company = _strip_date_range_from_text(company)
@@ -738,6 +745,13 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any) -> list[d
         item["location"] = _clean_string(item.get("location")) or _extract_location_fragment(
             _clean_string(entry.get("company")) or ""
         )
+        if item.get("company") and item.get("location"):
+            repaired_company, repaired_location = _repair_company_location_split(
+                str(item["company"]),
+                str(item["location"]),
+            )
+            item["company"] = repaired_company
+            item["location"] = repaired_location
         item["description"] = _trim_experience_description(item.get("description"))
         item["skills_used"] = _unique_clean_strings(item.get("skills_used", [])) if isinstance(item.get("skills_used"), list) else []
         item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
@@ -1169,12 +1183,41 @@ def _extract_full_name_from_top(text: str) -> str | None:
 
     for line in lines[:6]:
         if "@" in line:
+            # Recover names from OCR lines like:
+            # "Mounika10200@gmail.com Mounika Reddy"
+            candidate = re.sub(EMAIL_PATTERN, " ", line)
+            candidate = re.sub(r"\+?\d[\d()\-\s]{7,}\d", " ", candidate)
+            candidate = re.sub(r"(?i)\b(sr\.?\s*business analyst|business analyst|project manager)\b", " ", candidate)
+            candidate = re.sub(r"\s+", " ", candidate).strip(" |,-")
+            if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", candidate or "") and 2 <= len(candidate.split()) <= 5:
+                return _clean_string(candidate)
+            continue
+        if "@" in line:
             continue
         if re.search(r"\b(phone|email|summary|skills|experience|education|certification)\b", line, re.IGNORECASE):
             continue
         if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line) and 1 <= len(line.split()) <= 5:
             return _clean_string(line)
     return None
+
+
+def _repair_company_location_split(company: str, location: str) -> tuple[str, str]:
+    clean_company = _clean_string(company) or company
+    clean_location = _clean_string(location) or location
+
+    # Pattern seen in OCR/LLM output:
+    # company="Office of", location="Attorney General Child Support Division, TX"
+    if re.search(r"(?i)\bof$", clean_company):
+        parts = [part.strip() for part in clean_location.split(",") if part.strip()]
+        if len(parts) >= 2:
+            region = parts[-1]
+            if re.fullmatch(r"[A-Z]{2}", region):
+                org_part = ", ".join(parts[:-1]).strip()
+                if org_part:
+                    merged_company = f"{clean_company} {org_part}".strip()
+                    return _clean_string(merged_company) or clean_company, region
+
+    return clean_company, clean_location
 
 
 def _extract_volunteering_from_text(text: str) -> list[str]:
@@ -1526,6 +1569,22 @@ def _looks_like_location_text(value: str) -> bool:
     if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,30}", region_clean):
         return True
 
+    return False
+
+
+def _looks_like_bad_candidate_location(value: Any) -> bool:
+    text = _clean_string(value)
+    if not text:
+        return True
+    if len(text) > 80:
+        return True
+    lower = text.lower()
+    if any(signal in lower for signal in ["experience", "years", "summary", "industry", "worked", "project"]):
+        return True
+    if re.search(r"[.!?]", text):
+        return True
+    if "," in text and not _looks_like_location_text(text):
+        return True
     return False
 
 

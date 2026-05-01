@@ -527,6 +527,50 @@ Technology: Business Objects 4.0
         self.assertEqual(normalized.get("current_last_job"), "Project Manager")
         self.assertGreaterEqual(len(normalized.get("experience_entries", [])), 2)
 
+    def test_mounika_style_name_location_and_company_split_repairs(self) -> None:
+        parsed = {
+            "full_name": None,
+            "candidate_location": "Overall 8+ years of experience in Information technology industry.",
+            "experience_entries": [
+                {
+                    "title": "Sr. Business Analyst",
+                    "company": "Office of",
+                    "location": "Attorney General Child Support Division, TX",
+                    "start_date": "2015-10",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "Environment: ...",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+                {
+                    "title": "Sr. Business Analyst/Scrum Master",
+                    "company": "Environment: Java, Oracle PL/SQL",
+                    "location": "University of Texas Dallas, TX",
+                    "start_date": "2011-11",
+                    "end_date": "2013-12",
+                    "is_current": False,
+                    "description": "Project description",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+            ],
+        }
+        raw_text = """
+Mounika10200@gmail.com Mounika Reddy
+414-909-0756 Sr. Business Analyst
+Summary
+Overall 8+ years of experience in Information technology industry as Business Analyst in Retail, Healthcare, and Finance domains.
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        self.assertEqual(normalized.get("full_name"), "Mounika Reddy")
+        self.assertEqual(normalized.get("candidate_location"), "TX")
+        entries = normalized.get("experience_entries", [])
+        self.assertEqual(entries[0].get("company"), "Office of Attorney General Child Support Division")
+        self.assertEqual(entries[0].get("location"), "TX")
+        self.assertIsNone(entries[1].get("company"))
+
 
 if __name__ == "__main__":
     unittest.main()

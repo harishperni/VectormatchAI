@@ -382,6 +382,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["experience_entries"] = _repair_experience_entries(
         result.get("experience_entries", []),
         current_last_job=result.get("current_last_job"),
+        raw_text=raw_text,
     )
 
     projects = parsed.get("projects", [])
@@ -712,7 +713,7 @@ def _normalize_company_string(value: Any) -> str | None:
     return _clean_string(fallback)
 
 
-def _repair_experience_entries(entries: Any, *, current_last_job: Any) -> list[dict[str, Any]]:
+def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text: str = "") -> list[dict[str, Any]]:
     if not isinstance(entries, list):
         return []
 
@@ -745,6 +746,14 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any) -> list[d
         item["location"] = _clean_string(item.get("location")) or _extract_location_fragment(
             _clean_string(entry.get("company")) or ""
         )
+        if not item.get("location"):
+            inferred_location = _infer_location_from_raw_timeline_line(
+                raw_text,
+                company=item.get("company"),
+                start_date=item.get("start_date"),
+            )
+            if inferred_location:
+                item["location"] = inferred_location
         if item.get("company") and item.get("location"):
             repaired_company, repaired_location = _repair_company_location_split(
                 str(item["company"]),
@@ -1244,6 +1253,34 @@ def _repair_company_location_split(company: str, location: str) -> tuple[str, st
                     return _clean_string(merged_company) or clean_company, region
 
     return clean_company, clean_location
+
+
+def _infer_location_from_raw_timeline_line(raw_text: str, *, company: Any, start_date: Any) -> str | None:
+    comp = _clean_string(company)
+    if not comp or not raw_text:
+        return None
+
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    year = None
+    if isinstance(start_date, str):
+        year_match = re.match(r"^(\d{4})", start_date.strip())
+        if year_match:
+            year = year_match.group(1)
+
+    for line in lines:
+        if comp.lower() not in line.lower():
+            continue
+        if year and year not in line:
+            continue
+
+        # Example: "Office of Attorney General Child Support Division, TX Oct 2015-Present"
+        m = re.search(r",\s*([A-Z]{2})\b", line)
+        if m:
+            return m.group(1)
+        loc = _extract_location_fragment(line)
+        if loc:
+            return loc
+    return None
 
 
 def _extract_volunteering_from_text(text: str) -> list[str]:

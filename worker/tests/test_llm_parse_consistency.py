@@ -589,6 +589,44 @@ Overall 8+ years of experience in Information technology industry as Business An
         self.assertEqual(entries[0].get("location"), "TX")
         self.assertIsNone(entries[1].get("company"))
 
+    def test_infers_missing_current_location_from_raw_timeline_line(self) -> None:
+        parsed = {
+            "candidate_location": None,
+            "experience_entries": [
+                {
+                    "title": "Sr. Business Analyst",
+                    "company": "Office of Attorney General Child Support Division",
+                    "location": None,
+                    "start_date": "2015-10",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "Project details",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+                {
+                    "title": "Sr. Business Analyst",
+                    "company": "Atlas air",
+                    "location": "NY",
+                    "start_date": "2014-02",
+                    "end_date": "2015-09",
+                    "is_current": False,
+                    "description": "Project details",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+            ],
+        }
+        raw_text = """
+Office of Attorney General Child Support Division, TX Oct 2015-Present
+Atlas air, NY Feb 2014-Sep 2015
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertEqual(entries[0].get("location"), "TX")
+        self.assertEqual(normalized.get("candidate_location"), "TX")
+
 
 if __name__ == "__main__":
     unittest.main()

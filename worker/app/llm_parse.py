@@ -417,6 +417,9 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
             for entry in certifications
             if isinstance(entry, dict)
         ]
+        result["certifications"] = [
+            entry for entry in result["certifications"] if not _is_empty_certification(entry)
+        ]
 
     result["experience_entries"] = sort_experience_entries(result["experience_entries"])
 
@@ -920,6 +923,32 @@ def _merge_experience_entries(
 
         merged.append(item)
 
+    # Preserve fallback-only rows (for cases where LLM misses a role entirely).
+    seen_keys: set[tuple[str | None, str | None, bool]] = set()
+    for item in merged:
+        if not isinstance(item, dict):
+            continue
+        seen_keys.add(
+            (
+                _clean_date_string(item.get("start_date")),
+                _clean_date_string(item.get("end_date")),
+                bool(item.get("is_current")),
+            )
+        )
+
+    for raw in fallback_entries:
+        if not isinstance(raw, dict):
+            continue
+        key = (
+            _clean_date_string(raw.get("start_date")),
+            _clean_date_string(raw.get("end_date")),
+            bool(raw.get("is_current")),
+        )
+        if key in seen_keys:
+            continue
+        merged.append(dict(raw))
+        seen_keys.add(key)
+
     return merged
 
 
@@ -950,6 +979,15 @@ def _is_empty_education(education: dict[str, Any]) -> bool:
         and not education.get("end_date")
         and not education.get("gpa")
         and not education.get("location")
+    )
+
+
+def _is_empty_certification(certification: dict[str, Any]) -> bool:
+    return (
+        not certification.get("name")
+        and not certification.get("issuer")
+        and not certification.get("date")
+        and not certification.get("credential_id")
     )
 
 

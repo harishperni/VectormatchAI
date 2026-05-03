@@ -1240,13 +1240,30 @@ def _extract_full_name_from_top(text: str) -> str | None:
     if not lines:
         return None
 
+    # Highest-confidence path: explicit Name line.
+    for line in lines[:12]:
+        m = re.match(r"(?i)^\s*name\s*:\s*(.+)$", line)
+        if not m:
+            continue
+        candidate = _clean_string(m.group(1))
+        if not candidate:
+            continue
+        if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst)\b", candidate):
+            continue
+        if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", candidate) and 2 <= len(candidate.split()) <= 5:
+            return candidate
+
     for line in lines[:6]:
         if "@" in line:
             # Recover names from OCR lines like:
             # "Mounika10200@gmail.com Mounika Reddy"
             candidate = re.sub(EMAIL_PATTERN, " ", line)
             candidate = re.sub(r"\+?\d[\d()\-\s]{7,}\d", " ", candidate)
-            candidate = re.sub(r"(?i)\b(sr\.?\s*business analyst|business analyst|project manager)\b", " ", candidate)
+            candidate = re.sub(
+                r"(?i)\b(sr\.?\s*business analyst|business system analyst|business analyst|data analyst|quality analyst|project manager)\b",
+                " ",
+                candidate,
+            )
             candidate = re.sub(r"\s+", " ", candidate).strip(" |,-")
             if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", candidate or "") and 2 <= len(candidate.split()) <= 5:
                 return _clean_string(candidate)
@@ -1254,6 +1271,8 @@ def _extract_full_name_from_top(text: str) -> str | None:
         if "@" in line:
             continue
         if re.search(r"\b(phone|email|summary|skills|experience|education|certification)\b", line, re.IGNORECASE):
+            continue
+        if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b", line):
             continue
         if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line) and 1 <= len(line.split()) <= 5:
             return _clean_string(line)
@@ -1667,6 +1686,8 @@ def _looks_like_bad_candidate_location(value: Any) -> bool:
         return True
     lower = text.lower()
     if any(signal in lower for signal in ["experience", "years", "summary", "industry", "worked", "project"]):
+        return True
+    if lower.startswith("summary:"):
         return True
     if re.search(r"[.!?]", text):
         return True

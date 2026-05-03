@@ -627,6 +627,33 @@ Atlas air, NY Feb 2014-Sep 2015
         self.assertEqual(entries[0].get("location"), "TX")
         self.assertEqual(normalized.get("candidate_location"), "TX")
 
+    def test_brahma_name_line_and_summary_location_guard(self) -> None:
+        parsed = {
+            "full_name": None,
+            "candidate_location": "Summary: 8+ years of experience in Information technology industry.",
+            "experience_entries": [
+                {
+                    "title": "Sr. Business System Analyst",
+                    "company": "DST Health Solutions",
+                    "location": "Birmingham, AL",
+                    "start_date": "2016-07",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "Project details",
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ],
+        }
+        raw_text = """
+Name: Brahma Prathi
+Business System Analyst
+Summary: 8+ years of experience...
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        self.assertEqual(normalized.get("full_name"), "Brahma Prathi")
+        self.assertEqual(normalized.get("candidate_location"), "Birmingham, AL")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -440,6 +440,30 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["education"] = [item for item in result["education"] if not _is_empty_education(item)]
     if not result["education"]:
         result["education"] = _extract_education_from_text(raw_text)
+    else:
+        # Keep existing parser behavior, but augment when LLM returns only a partial
+        # education list and we can reliably recover additional entries from text.
+        extracted_education = _extract_education_from_text(raw_text)
+        if extracted_education:
+            existing_keys = {
+                (
+                    (_clean_string(item.get("degree")) or "").lower(),
+                    (_clean_string(item.get("field_of_study")) or "").lower(),
+                    (_clean_string(item.get("institution")) or "").lower(),
+                )
+                for item in result["education"]
+                if isinstance(item, dict)
+            }
+            for item in extracted_education:
+                key = (
+                    (_clean_string(item.get("degree")) or "").lower(),
+                    (_clean_string(item.get("field_of_study")) or "").lower(),
+                    (_clean_string(item.get("institution")) or "").lower(),
+                )
+                if key in existing_keys:
+                    continue
+                result["education"].append(item)
+                existing_keys.add(key)
 
     environment_skills = _extract_environment_skills_from_text(raw_text)
     if not result["skills"] and _has_skills_section(raw_text):
@@ -1173,7 +1197,7 @@ def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
         max_lines=40,
     )
     if not block:
-        return []
+        block = [line.strip() for line in text.splitlines() if line.strip()]
 
     certs: list[dict[str, Any]] = []
     for line in block:
@@ -2349,6 +2373,8 @@ def _looks_like_non_skill_phrase(token: str) -> bool:
 
     if re.search(r"(?i)\b(responsibilities|developed|worked|involved|designed|implemented|managed|provided|participated|coordinated)\b", token):
         return True
+    if re.search(r"(?i)\b(understanding|conducted|interviewed|maintaining|decision making|proposed|solution specifications|volume estimates)\b", token):
+        return True
     if re.search(r"(?i)\b(environment|technologies used|role)\b", token):
         return True
     if re.search(r"(?i)\b(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|sept\w*|oct\w*|nov\w*|dec\w*)\s*[-,]?\s*\d{2,4}\b", token):
@@ -2362,6 +2388,8 @@ def _looks_like_non_skill_phrase(token: str) -> bool:
     if re.search(r"(?i)^\s*(client|location|project name)\s*:", token):
         return True
     if re.search(r"(?i)\b[A-Za-z .'-]+,\s*(?:[A-Z]{2}|[A-Za-z]+)\b", token):
+        return True
+    if len(words) >= 5 and not re.search(r"[+#./-]", token):
         return True
     if re.fullmatch(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}", token.strip()):
         lower_token = token.lower()

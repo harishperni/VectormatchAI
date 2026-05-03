@@ -380,6 +380,77 @@ def _merge_with_recovery(primary: dict[str, Any], recovered: dict[str, Any]) -> 
     return merged
 
 
+def _parse_quality_score(parsed: dict[str, Any], normalized_text: str) -> float:
+    score = 0.0
+
+    if _clean_str(parsed.get("email")):
+        score += 3.0
+    if _clean_str(parsed.get("phone")):
+        score += 2.0
+    if _clean_str(parsed.get("full_name")):
+        score += 2.0
+    if _clean_str(parsed.get("professional_summary")):
+        score += 1.0
+
+    skills = parsed.get("skills", [])
+    if isinstance(skills, list):
+        score += min(len([s for s in skills if isinstance(s, str) and s.strip()]), 30) * 0.4
+
+    entries = parsed.get("experience_entries", [])
+    if isinstance(entries, list):
+        score += min(len(entries), 15) * 1.0
+        for entry in entries[:15]:
+            if not isinstance(entry, dict):
+                continue
+            if _clean_str(entry.get("title")):
+                score += 0.8
+            if _clean_str(entry.get("company")):
+                score += 0.8
+            if _clean_str(entry.get("description")):
+                score += 0.4
+
+    current_job = _clean_str(parsed.get("current_last_job")) or ""
+    if re.search(r"(?i)\b(pmp\s*expiration|certification|pmp number)\b", current_job):
+        score -= 3.0
+    if re.match(r"(?i)^\s*(technology|technologies|responsibilities|project description)\s*:", current_job):
+        score -= 2.0
+
+    if _has_resume_section(normalized_text, ("skills", "technical skills", "tools", "toolkit")):
+        if not isinstance(skills, list) or len(skills) < 3:
+            score -= 4.0
+    if _has_resume_section(normalized_text, ("work experience", "professional experience", "experience")):
+        if not isinstance(entries, list) or len(entries) < 2:
+            score -= 4.0
+
+    return score
+
+
+def _clean_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _choose_best_parse(primary: dict[str, Any], recovered: dict[str, Any], normalized_text: str) -> dict[str, Any]:
+    merged = _merge_with_recovery(primary, recovered)
+    candidates = [
+        ("primary", primary, _parse_quality_score(primary, normalized_text)),
+        ("merged", merged, _parse_quality_score(merged, normalized_text)),
+        ("recovered", recovered, _parse_quality_score(recovered, normalized_text)),
+    ]
+    best_name, best_payload, best_score = max(candidates, key=lambda item: item[2])
+    logger.info(
+        "parse quality comparison primary=%.2f merged=%.2f recovered=%.2f selected=%s(%.2f)",
+        candidates[0][2],
+        candidates[1][2],
+        candidates[2][2],
+        best_name,
+        best_score,
+    )
+    return best_payload
+
+
 def build_final_payload(strict_parsed: dict[str, Any], normalized_text: str) -> dict[str, Any]:
     final_payload = dict(strict_parsed)
     raw_skills = final_payload.get("skills_raw")
@@ -557,10 +628,11 @@ def process_resume_text(text: str) -> dict[str, Any]:
     if strict_parsed is None:
         logger.warning("V2 model parse failed; using strict fallback")
         strict_parsed = extract_resume_features_fallback(normalized_text)
-    elif _needs_parse_recovery(strict_parsed, normalized_text):
-        logger.warning("Sparse LLM parse detected; enriching with deterministic fallback extractors")
+    else:
         recovered = extract_resume_features_fallback(normalized_text)
-        strict_parsed = _merge_with_recovery(strict_parsed, recovered)
+        if _needs_parse_recovery(strict_parsed, normalized_text):
+            logger.warning("Sparse LLM parse detected; evaluating deterministic recovery candidates")
+        strict_parsed = _choose_best_parse(strict_parsed, recovered, normalized_text)
 
     return build_final_payload(strict_parsed, normalized_text)
 

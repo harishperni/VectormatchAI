@@ -486,7 +486,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["phone"] = _normalize_phone_value(result.get("phone"), raw_text)
     if result["email"] is None:
         result["email"] = _extract_email_from_text(raw_text)
-    if result.get("full_name") is None:
+    if result.get("full_name") is None or _looks_like_role_title(result.get("full_name")):
         result["full_name"] = _extract_full_name_from_top(raw_text)
     result["skills"] = _postprocess_skills(
         result.get("skills", []),
@@ -979,7 +979,8 @@ def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
         max_lines=30,
     )
     if not block:
-        block = lines[-30:]
+        # No explicit education section -> do not infer education from other sections.
+        return []
 
     stop_pattern = re.compile(
         r"(?i)\b(professional experience|work experience|technical skills|tools/methods|skills)\b"
@@ -1197,17 +1198,63 @@ def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
         max_lines=40,
     )
     if not block:
+        block = _extract_section_block(
+            text,
+            r"(?im)^\s*certification(?:s)?\s+and\s+technical\s+skills\s*$",
+            max_lines=50,
+        )
+    if not block:
         block = [line.strip() for line in text.splitlines() if line.strip()]
 
     certs: list[dict[str, Any]] = []
     for line in block:
-        if not re.search(r"(certified|certification|csm|istqb|six sigma|ncfm|qtp|quality center)", line, re.IGNORECASE):
+        if not re.search(r"(certified|certification|csm|istqb|six sigma|ncfm|qtp|quality center|analytics|adwords|mta|toastmasters)", line, re.IGNORECASE):
             continue
         name = _clean_string(re.sub(r"^[•*\-\s]+", "", line))
-        if name:
+        if not name:
+            continue
+        segments = [seg.strip() for seg in re.split(r"\s*,\s*", name) if seg.strip()]
+        split_added = False
+        for seg in segments:
+            if re.search(r"(?i)(certified|certification|analytics|adwords|mta|toastmasters|professional)", seg):
+                certs.append(
+                    {
+                        "name": seg,
+                        "issuer": None,
+                        "date": None,
+                        "credential_id": None,
+                    }
+                )
+                split_added = True
+        if not split_added:
             certs.append(
                 {
                     "name": name,
+                    "issuer": None,
+                    "date": None,
+                    "credential_id": None,
+                }
+            )
+
+    if certs:
+        return certs
+
+    # Narrow fallback: read lines directly below "Certifications:" label.
+    lines = [line.strip() for line in text.splitlines()]
+    for idx, line in enumerate(lines):
+        if not re.match(r"(?i)^\s*certifications?\s*:\s*$", line):
+            continue
+        for nxt in lines[idx + 1 : idx + 10]:
+            item = _clean_string(nxt)
+            if not item:
+                continue
+            if re.match(r"(?i)^\s*(work experience|education|languages|tools|environment)\s*:?\s*$", item):
+                break
+            if not re.search(r"(?i)(certified|certification|analytics|adwords|mta|toastmasters|professional)", item):
+                continue
+            certs.append(
+                {
+                    "name": item,
                     "issuer": None,
                     "date": None,
                     "credential_id": None,
@@ -1218,6 +1265,14 @@ def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
 
 def _extract_professional_summary_from_text(text: str) -> str | None:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # Prefer explicit single-line summary labels first.
+    for line in lines[:20]:
+        m = re.match(r"(?i)^\s*summary\s*:\s*(.+)$", line)
+        if m:
+            candidate = _clean_string(m.group(1))
+            if candidate and len(candidate.split()) >= 8:
+                return candidate
+
     for idx, line in enumerate(lines):
         if re.fullmatch(r"professional summary:?", line, re.IGNORECASE):
             parts: list[str] = []
@@ -2396,6 +2451,12 @@ def _looks_like_non_skill_phrase(token: str) -> bool:
         return True
     if re.search(r"(?i)\b(understanding|conducted|interviewed|maintaining|decision making|proposed|solution specifications|volume estimates)\b", token):
         return True
+    if re.search(r"(?i)\b(for\s+payments|client relations|supporting strategy|business modeling|invitations to tender|company strategy)\b", token):
+        return True
+    if re.search(r"(?i)\b(analysis|information|knowledge|policies|policy|eligibility)\b", token) and len(words) >= 2:
+        return True
+    if re.search(r"(?i)\b(test planning|crm\s*&?\s*workflow|requirements specifications)\b", token):
+        return True
     if re.search(r"(?i)\b(environment|technologies used|role)\b", token):
         return True
     if re.search(r"(?i)\b(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|sept\w*|oct\w*|nov\w*|dec\w*)\s*[-,]?\s*\d{2,4}\b", token):
@@ -2478,6 +2539,10 @@ def _is_generic_non_skill_token(token: str) -> bool:
         "ca",
         "sandiego",
         "sysintelliinc",
+        "information",
+        "knowledge",
+        "policy",
+        "eligibility",
     }
     if lowered in generic_exact:
         return True
@@ -2531,6 +2596,18 @@ def _is_generic_non_skill_token(token: str) -> bool:
             return True
 
     return False
+
+
+def _looks_like_role_title(value: Any) -> bool:
+    text = _clean_string(value)
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b",
+            text,
+        )
+    )
 
 
 def _looks_like_sentence_fragment(token: str) -> bool:

@@ -654,6 +654,47 @@ Summary: 8+ years of experience...
         self.assertEqual(normalized.get("full_name"), "Brahma Prathi")
         self.assertEqual(normalized.get("candidate_location"), "Birmingham, AL")
 
+    def test_brahma_summary_line_and_cert_education_section_parsing(self) -> None:
+        parsed = {
+            "professional_summary": None,
+            "education": [],
+            "certifications": [],
+            "skills": [],
+            "experience_entries": [
+                {
+                    "title": "Sr. Business System Analyst",
+                    "company": "DST Health Solutions",
+                    "location": "Birmingham, AL",
+                    "start_date": "2016-07",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "Project details",
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ],
+        }
+        raw_text = """
+Name: Brahma Prathi
+Summary: 8+ years of experience, discipline and highly-motivated Business System Analyst with healthcare domain.
+CERTIFICATION AND TECHNICAL SKILLS
+Languages:
+SQL, PL/SQL, XML, Java
+Certifications:
+SAS Certified Data Mining and Business Intelligence professional
+Google Analytics and AdWords Certified Professional
+Certified Microsoft Technology Associate (MTA) in .NET
+Education:
+Master's Degree in Computer Applications
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        self.assertIn("8+ years of experience", str(normalized.get("professional_summary") or ""))
+        self.assertGreaterEqual(len(normalized.get("certifications", [])), 2)
+        education = normalized.get("education", [])
+        self.assertGreaterEqual(len(education), 1)
+        self.assertIn("Master", str(education[0].get("degree") or ""))
+
 
 if __name__ == "__main__":
     unittest.main()

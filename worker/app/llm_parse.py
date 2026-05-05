@@ -197,6 +197,7 @@ PRESENT_WORDS = {
     "till now",
     "to date",
 }
+MIN_PLAUSIBLE_YEAR = 1950
 PRESENT_TOKEN_PATTERN = r"present|current|currently|now|today|ongoing|till(?:\s+(?:date|now))?|to\s+date"
 
 URL_PATTERN = re.compile(r"https?://[^\s|,;]+", re.IGNORECASE)
@@ -423,8 +424,14 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
 
     result["experience_entries"] = sort_experience_entries(result["experience_entries"])
 
-    if _experience_entries_need_fallback(result["experience_entries"], raw_text):
-        fallback_entries = _extract_experience_entries_from_text(raw_text)
+    fallback_entries = _extract_experience_entries_from_text(raw_text)
+    if fallback_entries and (
+        _experience_entries_need_fallback(result["experience_entries"], raw_text)
+        or _experience_entries_quality_score(
+            _merge_experience_entries(result["experience_entries"], fallback_entries)
+        )
+        > _experience_entries_quality_score(result["experience_entries"])
+    ):
         merged_entries = _merge_experience_entries(result["experience_entries"], fallback_entries)
         current_score = _experience_entries_quality_score(result["experience_entries"])
         merged_score = _experience_entries_quality_score(merged_entries)
@@ -474,8 +481,19 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     if environment_skills:
         result["skills"] = _unique_clean_strings([*result["skills"], *environment_skills])
 
-    if not result["certifications"] and _has_certification_section(raw_text):
-        result["certifications"] = _extract_certifications_from_text(raw_text)
+    if _has_certification_section(raw_text):
+        extracted_certifications = _extract_certifications_from_text(raw_text)
+        if extracted_certifications:
+            existing_cert_keys = {
+                (_clean_string(item.get("name")) or "").lower()
+                for item in result["certifications"]
+                if isinstance(item, dict)
+            }
+            for item in extracted_certifications:
+                cert_name = (_clean_string(item.get("name")) or "").lower()
+                if cert_name and cert_name not in existing_cert_keys:
+                    result["certifications"].append(item)
+                    existing_cert_keys.add(cert_name)
 
     if not result["volunteering"] and _has_volunteering_section(raw_text):
         result["volunteering"] = _extract_volunteering_from_text(raw_text)
@@ -494,6 +512,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["skills"] = _postprocess_skills(
         result.get("skills", []),
         result.get("certifications", []),
+        raw_text,
     )
     result["skills"] = _remove_client_location_skill_leakage(result.get("skills", []), raw_text)
     if _skills_need_fallback(result.get("skills", [])):
@@ -502,6 +521,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         combined = _postprocess_skills(
             [*extracted_skills, *environment_skills],
             result.get("certifications", []),
+            raw_text,
         )
         if combined:
             result["skills"] = combined
@@ -687,7 +707,7 @@ def _normalize_experience_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
         "is_current": inferred_is_current,
         "employment_type": _clean_string(entry.get("employment_type")),
         "description": _trim_experience_description(entry.get("description")),
-        "skills_used": _unique_clean_strings(entry.get("skills_used", []))
+        "skills_used": _sanitize_skills_used(_unique_clean_strings(entry.get("skills_used", [])))
         if isinstance(entry.get("skills_used"), list) else [],
         "achievements": _unique_clean_strings(entry.get("achievements", []))
         if isinstance(entry.get("achievements"), list) else [],
@@ -789,8 +809,10 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
             item["company"] = repaired_company
             item["location"] = repaired_location
         item["description"] = _trim_experience_description(item.get("description"))
-        item["skills_used"] = _unique_clean_strings(item.get("skills_used", [])) if isinstance(item.get("skills_used"), list) else []
+        item["skills_used"] = _sanitize_skills_used(_unique_clean_strings(item.get("skills_used", []))) if isinstance(item.get("skills_used"), list) else []
         item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
+        if isinstance(item.get("title"), str) and re.fullmatch(r"(?i)\s*responsibilities\s*:?\s*", item["title"]):
+            continue
 
         if (
             normalized_current_title
@@ -919,7 +941,7 @@ def _merge_experience_entries(
             if not _clean_string(item.get("description")):
                 item["description"] = _trim_experience_description(candidate.get("description"))
             if (not isinstance(item.get("skills_used"), list) or not item.get("skills_used")) and isinstance(candidate.get("skills_used"), list):
-                item["skills_used"] = _unique_clean_strings(candidate.get("skills_used", []))
+                item["skills_used"] = _sanitize_skills_used(_unique_clean_strings(candidate.get("skills_used", [])))
 
         merged.append(item)
 
@@ -1013,11 +1035,16 @@ def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     block = _extract_section_block(
         text,
-        r"^\s*(education(?: and certifications)?|education & certifications)\s*:?\s*$",
+        r"^\s*(education(?:al details)?(?: and certifications)?|education & certifications)\s*:?",
         max_lines=30,
     )
     if not block:
-        # No explicit education section -> do not infer education from other sections.
+        inline_matches = re.findall(
+            r"(?im)^\s*education\s*:\s*([^\n.]+(?:\.[^\n]*)?)\s*$",
+            text,
+        )
+        block = [_clean_string(match) for match in inline_matches if _clean_string(match)]
+    if not block:
         return []
 
     stop_pattern = re.compile(
@@ -1054,6 +1081,12 @@ def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
         field = None
         if degree_match:
             degree = _clean_string(degree_match.group(1))
+            degree_phrase_match = re.search(
+                r"(?i)\b((?:bachelor|master)(?:['’]s)?(?:\s+of\s+[A-Za-z][A-Za-z &/().'-]{2,60})?)",
+                line,
+            )
+            if degree_phrase_match:
+                degree = _clean_string(degree_phrase_match.group(1))
             field_match = field_pattern.search(line)
             if field_match:
                 field = _clean_string(field_match.group(1))
@@ -1061,12 +1094,19 @@ def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
             degree = _clean_string(line)
 
         institution_match = institution_pattern.search(line)
+        institution_value = _clean_string(institution_match.group(1)) if institution_match else None
+        if not institution_match:
+            parts = [part.strip(" .") for part in line.split(",") if part.strip(" .")]
+            if len(parts) >= 2 and degree_match:
+                institution_candidate = parts[1]
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .&'-]{1,80}", institution_candidate):
+                    institution_value = _clean_string(institution_candidate)
         year_match = re.search(r"\b(19|20)\d{2}\b", line)
         end_date = f"{year_match.group(0)}-06" if year_match else None
 
         entries.append(
             {
-                "institution": _clean_string(institution_match.group(1)) if institution_match else None,
+                "institution": institution_value,
                 "degree": degree,
                 "field_of_study": field,
                 "start_date": None,
@@ -1098,11 +1138,19 @@ def _extract_section_block(text: str, header_pattern: str, max_lines: int = 60) 
     for line in lines:
         if not in_section and re.search(header_pattern, line, re.IGNORECASE):
             in_section = True
+            inline = re.sub(header_pattern, "", line, flags=re.IGNORECASE).strip(" :-")
+            if inline:
+                collected.append(inline)
             continue
 
         if not in_section:
             continue
 
+        if re.fullmatch(
+            r"(?i)\s*(professional summary|summary|professional experience|work experience|experience|education(?:al details)?|technical skills?|skills?|projects?|certifications?|languages?)\s*:?\s*",
+            line,
+        ):
+            break
         if re.fullmatch(r"[A-Z][A-Z /\-&]{3,}:?", line) and collected:
             break
         if re.fullmatch(r"[A-Za-z][A-Za-z /\-&]{3,}:", line) and collected:
@@ -1230,23 +1278,18 @@ def _looks_like_company_label(value: str | None) -> bool:
 
 
 def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
+    # Zero-hallucination mode: only parse explicit certification-labeled sections.
     block = _extract_section_block(
         text,
-        r"\b(certifications?|education\s*/\s*certi\w*\s*/\s*training)\b",
+        r"(?im)^\s*(certifications?|licenses?|professional certifications?)\s*:?\s*$",
         max_lines=40,
     )
     if not block:
-        block = _extract_section_block(
-            text,
-            r"(?im)^\s*certification(?:s)?\s+and\s+technical\s+skills\s*$",
-            max_lines=50,
-        )
-    if not block:
-        block = [line.strip() for line in text.splitlines() if line.strip()]
+        return []
 
     certs: list[dict[str, Any]] = []
     for line in block:
-        if not re.search(r"(certified|certification|csm|istqb|six sigma|ncfm|qtp|quality center|analytics|adwords|mta|toastmasters)", line, re.IGNORECASE):
+        if not re.search(r"(certified|certification|professional|psm|csm|istqb|six sigma|ncfm|qtp|quality center|analytics|adwords|mta|toastmasters)", line, re.IGNORECASE):
             continue
         name = _clean_string(re.sub(r"^[•*\-\s]+", "", line))
         if not name:
@@ -1274,30 +1317,6 @@ def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
                 }
             )
 
-    if certs:
-        return certs
-
-    # Narrow fallback: read lines directly below "Certifications:" label.
-    lines = [line.strip() for line in text.splitlines()]
-    for idx, line in enumerate(lines):
-        if not re.match(r"(?i)^\s*certifications?\s*:\s*$", line):
-            continue
-        for nxt in lines[idx + 1 : idx + 10]:
-            item = _clean_string(nxt)
-            if not item:
-                continue
-            if re.match(r"(?i)^\s*(work experience|education|languages|tools|environment)\s*:?\s*$", item):
-                break
-            if not re.search(r"(?i)(certified|certification|analytics|adwords|mta|toastmasters|professional)", item):
-                continue
-            certs.append(
-                {
-                    "name": item,
-                    "issuer": None,
-                    "date": None,
-                    "credential_id": None,
-                }
-            )
     return certs
 
 
@@ -1344,6 +1363,7 @@ def _extract_full_name_from_top(text: str) -> str | None:
         if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst)\b", candidate):
             continue
         if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", candidate) and 2 <= len(candidate.split()) <= 5:
+            candidate = re.sub(r"(?i)\bEmployer Details\b", "", candidate).strip(" ,-")
             return candidate
 
     for line in lines[:6]:
@@ -1358,6 +1378,7 @@ def _extract_full_name_from_top(text: str) -> str | None:
                 candidate,
             )
             candidate = re.sub(r"\s+", " ", candidate).strip(" |,-")
+            candidate = re.sub(r"(?i)\bEmployer Details\b", "", candidate).strip(" ,-")
             if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", candidate or "") and 2 <= len(candidate.split()) <= 5:
                 return _clean_string(candidate)
             continue
@@ -1367,6 +1388,7 @@ def _extract_full_name_from_top(text: str) -> str | None:
             continue
         if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b", line):
             continue
+        line = re.sub(r"(?i)\bEmployer Details\b", "", line).strip(" ,-")
         if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line) and 1 <= len(line.split()) <= 5:
             return _clean_string(line)
     return None
@@ -1778,6 +1800,8 @@ def _looks_like_bad_candidate_location(value: Any) -> bool:
     if len(text) > 80:
         return True
     lower = text.lower()
+    if len(text.split()) > 5:
+        return True
     if any(signal in lower for signal in ["experience", "years", "summary", "industry", "worked", "project"]):
         return True
     if lower.startswith("summary:"):
@@ -1967,10 +1991,16 @@ def _normalize_year_token(token: str | None) -> int | None:
     if not cleaned.isdigit():
         return None
     if len(cleaned) == 4:
-        return int(cleaned)
+        value = int(cleaned)
+        if MIN_PLAUSIBLE_YEAR <= value <= (date.today().year + 1):
+            return value
+        return None
     if len(cleaned) == 2:
         value = int(cleaned)
-        return 2000 + value if value <= 30 else 1900 + value
+        resolved = 2000 + value if value <= 30 else 1900 + value
+        if MIN_PLAUSIBLE_YEAR <= resolved <= (date.today().year + 1):
+            return resolved
+        return None
     return None
 
 
@@ -1987,7 +2017,10 @@ def _normalize_date_token(token: str | None, *, is_end: bool) -> str | None:
     if re.fullmatch(r"\d{4}-\d{2}", value):
         return value
     if re.fullmatch(r"\d{4}", value):
-        return value
+        year = int(value)
+        if MIN_PLAUSIBLE_YEAR <= year <= (date.today().year + 1):
+            return value
+        return None
 
     m = re.fullmatch(r"(?i)\s*(" + MONTH_NAME_PATTERN + r")\s*[’',/-]?\s*(\d{2,4})\s*", value)
     if m:
@@ -2005,7 +2038,10 @@ def _normalize_date_token(token: str | None, *, is_end: bool) -> str | None:
 
     m = re.search(r"\b(\d{4})\b", value)
     if m:
-        return m.group(1)
+        year = int(m.group(1))
+        if MIN_PLAUSIBLE_YEAR <= year <= (date.today().year + 1):
+            return m.group(1)
+        return None
 
     return None
 
@@ -2075,6 +2111,7 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
         if not start_date and not end_date and not is_current:
             continue
 
+        next_entry_idx = date_line_indexes[pos + 1] if pos + 1 < len(date_line_indexes) else len(lines)
         line_without_dates = _strip_date_range_from_text(line)
         location = _extract_location_fragment(line_without_dates)
         company = _normalize_company_string(line_without_dates)
@@ -2099,6 +2136,16 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
         is_location_duration_line = bool(
             re.search(r"\b(location|duration)\b", line, re.IGNORECASE)
         )
+        lookahead_title, lookahead_location = _scan_role_and_location_after_date_line(
+            lines,
+            start_idx=idx + 1,
+            end_idx=next_entry_idx,
+        )
+        if lookahead_location and not location:
+            location = lookahead_location
+        if lookahead_title:
+            title = lookahead_title
+
         if is_location_duration_line and idx > 0:
             prev_line = lines[idx - 1]
             prev_line_clean = _clean_string(prev_line)
@@ -2133,7 +2180,6 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
             ):
                 title = prev_line_clean
 
-        next_entry_idx = date_line_indexes[pos + 1] if pos + 1 < len(date_line_indexes) else len(lines)
         description_start = idx + 1
         if title and idx + 1 < len(lines):
             maybe_title_line = _clean_string(lines[idx + 1])
@@ -2171,6 +2217,48 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
         if item.get("company") or item.get("title") or item.get("start_date") or item.get("end_date")
     ]
     return sort_experience_entries(cleaned_entries)
+
+
+def _scan_role_and_location_after_date_line(
+    lines: list[str],
+    *,
+    start_idx: int,
+    end_idx: int,
+) -> tuple[str | None, str | None]:
+    title: str | None = None
+    location: str | None = None
+
+    hard_stop = re.compile(
+        r"(?i)^\s*(project\s+description|responsibilities|environment|education|certifications?|skills?)\s*:?"
+    )
+    role_pattern = re.compile(r"(?i)^\s*role(?:\s*[\\/]\s*designation)?\s*:\s*(.+?)\s*$")
+    location_pattern = re.compile(r"(?i)^\s*location\s*:\s*(.+?)\s*$")
+
+    for raw in lines[start_idx : min(end_idx, start_idx + 8)]:
+        line = _clean_string(raw)
+        if not line:
+            continue
+
+        location_match = location_pattern.match(line)
+        if location_match and not location:
+            candidate_location = _extract_location_fragment(location_match.group(1)) or _clean_string(
+                location_match.group(1).strip(" .")
+            )
+            if candidate_location and not _looks_like_bad_candidate_location(candidate_location):
+                location = candidate_location
+            continue
+
+        role_match = role_pattern.match(line)
+        if role_match and not title:
+            candidate_title = _clean_string(role_match.group(1))
+            if candidate_title and not _looks_like_org_line(candidate_title):
+                title = candidate_title
+            continue
+
+        if hard_stop.match(line):
+            break
+
+    return title, location
 
 
 def _extract_work_experience_block(text: str) -> str:
@@ -2332,7 +2420,7 @@ def _infer_willing_to_relocate_from_text(text: str) -> bool | None:
     return None
 
 
-def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
+def _postprocess_skills(skills: Any, certifications: Any, raw_text: str = "") -> list[str]:
     if not isinstance(skills, list):
         return []
 
@@ -2349,6 +2437,7 @@ def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
                 name = _clean_string(cert.get("name"))
                 if name:
                     cert_names.append(name.lower())
+    dynamic_short_allowlist = _extract_dynamic_short_skill_allowlist(raw_text)
 
     filtered: list[str] = []
     for token in _unique_clean_strings(normalized_candidates):
@@ -2399,11 +2488,47 @@ def _postprocess_skills(skills: Any, certifications: Any) -> list[str]:
             continue
         if _looks_like_sentence_fragment(cleaned_token):
             continue
+        if not _should_keep_skill_token(cleaned_token, dynamic_short_allowlist):
+            continue
         if cert_names and any(lowered == name or lowered in name or name in lowered for name in cert_names):
             continue
         filtered.append(cleaned_token)
 
     return _unique_clean_strings(filtered)
+
+
+def _extract_dynamic_short_skill_allowlist(raw_text: str) -> set[str]:
+    allow: set[str] = set()
+    if not raw_text:
+        return allow
+
+    section_patterns = [
+        r"(?im)^\s*(technical skills?|tools(?:\s*&\s*environments?)?|tools|environment(?:\s*(?:\\|/)\s*tools)?|languages?)\s*:?\s*$",
+    ]
+    blocks: list[str] = []
+    for pattern in section_patterns:
+        for line in _extract_section_block(raw_text, pattern, max_lines=40):
+            cleaned = _clean_string(line)
+            if cleaned:
+                blocks.append(cleaned)
+
+    # Also reuse parsed environment lines to capture explicit short tokens.
+    blocks.extend(_extract_environment_skills_from_text(raw_text))
+
+    for line in blocks:
+        for part in re.split(r"[,;|()/\s]+", line):
+            tok = _clean_string(part)
+            if not tok:
+                continue
+            lowered = tok.lower()
+            compact = re.sub(r"[^a-z0-9+#.]", "", lowered)
+            if not compact:
+                continue
+            if compact in {"c", "r", "js", "ts", "sql", "etl", "ui", "ux", "qa", "ai", "ml", "bi"}:
+                allow.add(compact)
+            if lowered in {"c#", "c++", ".net"}:
+                allow.add(lowered)
+    return allow
 
 
 def _normalize_composite_skill_token(token: str) -> str | None:
@@ -2581,6 +2706,19 @@ def _is_generic_non_skill_token(token: str) -> bool:
         "knowledge",
         "policy",
         "eligibility",
+        "education",
+        "summary",
+        "team",
+        "using",
+        "used",
+        "worked",
+        "developed",
+        "responsible",
+        "experienced",
+        "project",
+        "test",
+        "sequence",
+        "is a",
     }
     if lowered in generic_exact:
         return True
@@ -2642,7 +2780,7 @@ def _looks_like_role_title(value: Any) -> bool:
         return False
     return bool(
         re.search(
-            r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b",
+            r"(?i)\b(sr\.?\s*)?(business systems? analyst|business analyst|data analyst|quality analyst|project manager|scrum master)\b",
             text,
         )
     )
@@ -2667,6 +2805,61 @@ def _looks_like_sentence_fragment(token: str) -> bool:
         return True
     if lowered.endswith("."):
         return True
+    return False
+
+
+def _should_keep_skill_token(token: str, dynamic_short_allowlist: set[str] | None = None) -> bool:
+    lowered = token.lower().strip()
+    if not lowered:
+        return False
+
+    normalized = re.sub(r"[_/]+", " ", lowered)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    words = [w for w in re.split(r"\s+", normalized) if w]
+
+    # compact short-token policy: keep only core technical abbreviations/symbolic langs.
+    compact = re.sub(r"[^a-z0-9+#.]", "", normalized)
+    short_allow = {"c", "r", "bi", "ui", "ux", "qa", "ai", "ml", "js", "ts", "sql", "etl"}
+    if dynamic_short_allowlist:
+        short_allow = short_allow.union(dynamic_short_allowlist)
+    symbolic_short_allow = {"c#", "c++", ".net"}
+    if len(compact) <= 2 and compact not in short_allow and normalized not in symbolic_short_allow:
+        return False
+
+    # Drop obvious prose leftovers and malformed fragments.
+    if re.search(r"(?i)\b(is a|happy to assist|let me know|summary|project|team|responsible|experienced)\b", normalized):
+        return False
+    if re.fullmatch(r"[a-z]{1,2}", normalized):
+        return False
+    if len(words) >= 5 and not re.search(r"[0-9+#./-]", normalized):
+        return False
+
+    # High-confidence technical markers.
+    tech_hints = (
+        r"sql|oracle|postgres|mysql|mongodb|redis|snowflake|db2|"
+        r"java|j2ee|python|javascript|typescript|c\+\+|c#|\.net|php|html|css|xml|json|"
+        r"react|angular|vue|node|spring|hibernate|django|flask|"
+        r"aws|azure|gcp|docker|kubernetes|jenkins|git|jira|confluence|"
+        r"tableau|power\s*bi|power\s*apps|power\s*automate|informatica|ssis|ssas|ssrs|olap|qtp|mule|salesforce|apex|soql|wsdl|soap|rest|api|"
+        r"agile|scrum|kanban|waterfall|rup|tdd|uat|erwin|visio|postman|sharepoint|eclipse|arcgis|mainframes?|hp\s*alm|hpqc"
+    )
+    if re.search(rf"(?i)\b({tech_hints})\b", normalized):
+        return True
+
+    # Allow explicit versioned/vendor-like technical tokens.
+    if re.search(r"\b\d+(?:\.\d+)+\b", normalized):
+        return True
+    if re.search(r"(?i)\b(?:ms|ibm|oracle|aws|sap|adobe|apache)\b", normalized):
+        return True
+
+    # Keep likely explicit tool/product identifiers (e.g., MyCustomInternalTool).
+    if (
+        len(words) == 1
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]{4,}", token.strip())
+        and re.search(r"[A-Z0-9_.+-]", token[1:])
+    ):
+        return True
+
     return False
 
 
@@ -2759,6 +2952,21 @@ def _unique_clean_strings(values: list[Any]) -> list[str]:
             result.append(cleaned)
 
     return result
+
+
+def _sanitize_skills_used(values: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for value in values:
+        token = _clean_string(value)
+        if not token:
+            continue
+        lower = token.lower()
+        if re.search(r"(?i)\b(happy to assist|let me know|how can i help|i can help)\b", lower):
+            continue
+        if token.endswith(("!", "?")) and len(token.split()) >= 2:
+            continue
+        cleaned.append(token)
+    return cleaned
 
 
 def _normalize_phone_value(phone: Any, raw_text: str) -> str | None:
@@ -2940,6 +3148,8 @@ def _parse_normalized_date(value: Any, *, is_end: bool) -> date | None:
 
     if re.fullmatch(r"\d{4}-\d{2}", value):
         year, month = map(int, value.split("-"))
+        if year < 1950 or year > (date.today().year + 1):
+            return None
         if not (1 <= month <= 12):
             return None
         if is_end:
@@ -2949,6 +3159,8 @@ def _parse_normalized_date(value: Any, *, is_end: bool) -> date | None:
 
     if re.fullmatch(r"\d{4}", value):
         year = int(value)
+        if year < 1950 or year > (date.today().year + 1):
+            return None
         return date(year, 12, 31) if is_end else date(year, 1, 1)
 
     return None
@@ -3003,6 +3215,12 @@ def derive_primary_domain(
     parts.extend(entry.get("title") or "" for entry in entries if isinstance(entry, dict))
     parts.extend(skills if isinstance(skills, list) else [])
     text = " ".join(parts).lower()
+
+    role_text_parts = [current_last_job or ""]
+    role_text_parts.extend(entry.get("title") or "" for entry in entries if isinstance(entry, dict))
+    role_text = " ".join(role_text_parts).lower()
+    if re.search(r"\b(scrum master|business systems? analyst|business analyst|product owner)\b", role_text):
+        return "Business Analysis / Agile Delivery"
 
     rules = [
         ("Mobile Engineering", ["ios", "android", "flutter", "react native", "mobile"]),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.llm_parse import _normalize_llm_parse_output_v2
+from app.llm_parse import _normalize_llm_parse_output_v2, derive_primary_domain
 
 
 class LlmParseConsistencyTests(unittest.TestCase):
@@ -43,6 +43,79 @@ Automated invoice processing workflow with Power Automate.
         self.assertIn("power automate", skills)
         self.assertEqual(normalized.get("candidate_location"), "Plano, TX")
         self.assertEqual(normalized.get("email"), "yeswanthnagaharish.perni@gmail.com")
+
+    def test_akhil_style_role_location_and_domain_recovery(self) -> None:
+        parsed = {
+            "full_name": "Akhil",
+            "candidate_location": "8+ years of intensifying experience in multiple roles as Business Analyst, Business Systems Analyst, Scrum Master and achieved titles.",
+            "current_last_job": "Scrum Master",
+            "skills": ["Java", "Oracle", "JIRA", "SharePoint"],
+            "experience_entries": [
+                {
+                    "company": "Client: JPMorgan Chase",
+                    "title": "Scrum Master",
+                    "location": None,
+                    "start_date": "2016-03",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "Project Description",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+                {
+                    "company": "Client: Global Payments",
+                    "title": None,
+                    "location": None,
+                    "start_date": "2015-04",
+                    "end_date": "2016-02",
+                    "is_current": False,
+                    "description": "Project Description",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+            ],
+        }
+        raw_text = """
+Akhil
+Sr. Business Systems Analyst
+akhil.mohan0109@gmail.com
+Phone no: 510-953-0677 Professional Summary:
+8+ years of intensifying experience in multiple roles as Business Analyst, Business Systems Analyst, Scrum Master.
+Professional Work Experience:
+Client: JPMorgan Chase MAR 2016 to Till Date
+Location: Wilmington, Delaware.
+Role: Sr. Business Systems Analyst/ Scrum Master
+Project Description: Initiated Loan Origination System.
+Responsibilities:
+Supported multiple product teams.
+Environment: Waterfall-Scrum hybrid, JIRA, Confluence, Oracle 11g, Java, SharePoint
+Client: Global Payments APR 2015 to FEB 2016
+Location: Atlanta, Georgia.
+Role: Sr. Business Analyst/Scrum Master
+Project Description: Business Glossary migration.
+Responsibilities:
+Gathered Business requirements.
+Environment: SAFe, Agile/Scrum, IBM InfoSphere suite, Oracle, Java, MS VISIO, SharePoint
+Education: Bachelor of Technology, JNTU, Hyderabad.
+Certifications:
+Professional Scrum Master (PSM).
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+
+        self.assertEqual(normalized.get("candidate_location"), "Wilmington, Delaware")
+        self.assertEqual(entries[0].get("location"), "Wilmington, Delaware")
+        self.assertEqual(entries[1].get("title"), "Sr. Business Analyst/Scrum Master")
+        self.assertEqual(entries[1].get("location"), "Atlanta, Georgia")
+        self.assertEqual(
+            derive_primary_domain(
+                normalized.get("current_last_job"),
+                entries,
+                normalized.get("skills", []),
+            ),
+            "Business Analysis / Agile Delivery",
+        )
 
     def test_repairs_malformed_experience_entries_with_fallback(self) -> None:
         parsed = {
@@ -514,6 +587,52 @@ Bachelor of Engineering
         skills = normalized.get("skills", [])
         self.assertIn("olap", skills)
         self.assertIn("vbscripts", skills)
+
+    def test_recovers_company_and_state_from_timeline_line(self) -> None:
+        parsed = {"experience_entries": []}
+        raw_text = """
+PROFESSIONAL EXPERIENCE:
+Citi Bank, NJ Aug 2016 to till date
+Business Analyst, Commercial Banking IT
+Responsibilities:
+Wrote SQL queries to test the database.
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("company"), "Citi Bank")
+        self.assertEqual(entries[0].get("location"), "NJ")
+
+    def test_drops_fully_empty_experience_rows(self) -> None:
+        parsed = {
+            "experience_entries": [
+                {
+                    "title": "Business Analyst",
+                    "company": "Citi Bank",
+                    "location": "NJ",
+                    "start_date": "2016-08",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "desc",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+                {
+                    "title": None,
+                    "company": None,
+                    "location": None,
+                    "start_date": None,
+                    "end_date": None,
+                    "is_current": None,
+                    "description": None,
+                    "skills_used": [],
+                    "achievements": [],
+                },
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "WORK EXPERIENCE")
+        entries = normalized.get("experience_entries", [])
+        self.assertEqual(len(entries), 1)
 
     def test_client_block_fallback_and_pmp_title_guard(self) -> None:
         parsed = {

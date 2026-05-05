@@ -804,6 +804,11 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         item["location"] = _clean_string(item.get("location")) or _extract_location_fragment(
             _clean_string(entry.get("company")) or ""
         )
+        if item.get("company") and not item.get("location"):
+            split_company, split_location = _split_org_and_region_from_line(str(item["company"]))
+            if split_company and split_location:
+                item["company"] = split_company
+                item["location"] = split_location
         if not item.get("location"):
             inferred_location = _infer_location_from_raw_timeline_line(
                 raw_text,
@@ -823,6 +828,18 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         item["skills_used"] = _sanitize_skills_used(_unique_clean_strings(item.get("skills_used", []))) if isinstance(item.get("skills_used"), list) else []
         item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
         if isinstance(item.get("title"), str) and re.fullmatch(r"(?i)\s*responsibilities\s*:?\s*", item["title"]):
+            continue
+        if not any(
+            [
+                _clean_string(item.get("company")),
+                _clean_string(item.get("title")),
+                _clean_string(item.get("location")),
+                _clean_date_string(item.get("start_date")),
+                _clean_date_string(item.get("end_date")),
+                bool(item.get("is_current")),
+                _clean_string(item.get("description")),
+            ]
+        ):
             continue
 
         if (
@@ -1025,6 +1042,11 @@ def _dedupe_education_entries(entries: Any) -> list[dict[str, Any]]:
             continue
         degree = (_clean_string(item.get("degree")) or "").strip(" .").lower()
         field = (_clean_string(item.get("field_of_study")) or "").strip(" .").lower()
+        if not field and " in " in degree:
+            prefix, suffix = degree.split(" in ", 1)
+            if prefix and suffix:
+                degree = prefix.strip()
+                field = suffix.strip()
         institution = (_clean_string(item.get("institution")) or "").strip(" .").lower()
         end_date = (_clean_string(item.get("end_date")) or "").strip().lower()
         key = (degree, field, institution, end_date)
@@ -1779,6 +1801,24 @@ def _looks_like_location_text(value: str) -> bool:
         return False
     if any(re.search(r"\d", w) for w in city_words):
         return False
+    # Avoid misclassifying employer names as locations (e.g., "Citi Bank, NJ").
+    city_lower = city.lower()
+    org_city_signals = {
+        "bank",
+        "insurance",
+        "technologies",
+        "systems",
+        "solutions",
+        "university",
+        "college",
+        "hospital",
+        "therapeutics",
+        "investments",
+        "division",
+        "department",
+    }
+    if any(signal in city_lower for signal in org_city_signals):
+        return False
 
     # Reject obvious sentence fragments accidentally captured as locations.
     lower_text = text.lower()
@@ -2146,6 +2186,11 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
         line_without_dates = _strip_date_range_from_text(line)
         location = _extract_location_fragment(line_without_dates)
         company = _normalize_company_string(line_without_dates)
+        if not company and location:
+            org_from_loc, loc_from_loc = _split_org_and_region_from_line(location)
+            if org_from_loc:
+                company = org_from_loc
+                location = loc_from_loc or location
 
         # When the date line is just "Location: X | Duration: ...", recover
         # company/title from neighboring lines.
@@ -3078,6 +3123,24 @@ def _clean_experience_title(value: Any) -> str | None:
     title = re.sub(r"(?i)\s+responsibilities?\s*:?\s*$", "", title).strip(" :-")
     title = re.sub(r"(?i)^responsibilities?\s*:?\s*", "", title).strip(" :-")
     return _clean_string(title)
+
+
+def _split_org_and_region_from_line(value: str) -> tuple[str | None, str | None]:
+    text = _clean_string(value)
+    if not text or "," not in text:
+        return None, None
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) != 2:
+        return None, None
+    org, region = parts[0], parts[1]
+    if not re.fullmatch(r"[A-Z]{2}", region):
+        return None, None
+    if not re.search(
+        r"(?i)\b(bank|insurance|technologies|systems|solutions|investments|therapeutics|university|college|department|division)\b",
+        org,
+    ):
+        return None, None
+    return _clean_string(org), _clean_string(region)
 
 
 def _extract_explicit_tech_mentions_from_text(text: str) -> list[str]:

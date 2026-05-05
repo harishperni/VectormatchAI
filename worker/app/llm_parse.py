@@ -824,6 +824,8 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         if raw_company:
             parsed_client_company, parsed_client_location = _parse_client_company_location_from_line(raw_company)
         item["company"] = _normalize_company_string(raw_company)
+        if _looks_like_month_or_date_fragment(item.get("company")):
+            item["company"] = None
         item["title"] = _clean_experience_title(item.get("title"))
         if parsed_client_company:
             item["company"] = parsed_client_company
@@ -849,6 +851,14 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
             )
             if inferred_location:
                 item["location"] = inferred_location
+        if not item.get("company"):
+            inferred_company = _infer_company_from_raw_timeline_line(
+                raw_text,
+                start_date=item.get("start_date"),
+                title=item.get("title"),
+            )
+            if inferred_company:
+                item["company"] = inferred_company
         if item.get("company") and item.get("location"):
             repaired_company, repaired_location = _repair_company_location_split(
                 str(item["company"]),
@@ -864,6 +874,8 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         item["skills_used"] = _sanitize_skills_used(_unique_clean_strings(item.get("skills_used", []))) if isinstance(item.get("skills_used"), list) else []
         item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
         if isinstance(item.get("title"), str) and re.fullmatch(r"(?i)\s*responsibilities\s*:?\s*", item["title"]):
+            continue
+        if _looks_like_education_artifact_experience_entry(item):
             continue
         if not any(
             [
@@ -1571,6 +1583,53 @@ def _infer_location_from_raw_timeline_line(raw_text: str, *, company: Any, start
         loc = _extract_location_fragment(line)
         if loc:
             return loc
+    return None
+
+
+def _infer_company_from_raw_timeline_line(raw_text: str, *, start_date: Any, title: Any) -> str | None:
+    if not raw_text:
+        return None
+
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    year = None
+    if isinstance(start_date, str):
+        year_match = re.match(r"^(\d{4})", start_date.strip())
+        if year_match:
+            year = year_match.group(1)
+
+    title_l = (_clean_string(title) or "").lower()
+
+    for idx, line in enumerate(lines):
+        if _extract_date_range_from_text(line) == (None, None, False):
+            continue
+        if year and year not in line:
+            continue
+
+        for back in range(1, 4):
+            prev_idx = idx - back
+            if prev_idx < 0:
+                break
+            prev = _clean_string(lines[prev_idx])
+            if not prev:
+                continue
+            if re.search(r"(?i)^\s*(professional summary|summary|technical skills?|skills?|education|educational documents)\s*:?\s*$", prev):
+                continue
+            if _extract_date_range_from_text(prev) != (None, None, False):
+                continue
+            if title_l and prev.lower() == title_l:
+                continue
+            if _looks_like_probable_job_title(prev):
+                continue
+            if _looks_like_month_or_date_fragment(prev):
+                continue
+            candidate = _normalize_company_string(prev)
+            if candidate and not _looks_like_month_or_date_fragment(candidate):
+                return candidate
+
+        same_line_company = _normalize_company_string(_strip_date_range_from_text(line))
+        if same_line_company and not _looks_like_month_or_date_fragment(same_line_company):
+            return same_line_company
+
     return None
 
 
@@ -2441,7 +2500,7 @@ def _extract_work_experience_block(text: str) -> str:
             continue
 
         if start_idx is not None and re.fullmatch(
-            r"(?i)(education|skills|certifications|additional information|technical skills)",
+            r"(?i)(education|educational details|educational documents|skills|certifications|additional information|technical skills)",
             line.rstrip(":"),
         ):
             end_idx = i
@@ -2951,6 +3010,20 @@ def _looks_like_role_title(value: Any) -> bool:
     )
 
 
+def _looks_like_probable_job_title(value: Any) -> bool:
+    text = _clean_string(value)
+    if not text:
+        return False
+    if len(text.split()) > 10:
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b(developer|engineer|analyst|manager|architect|consultant|administrator|coordinator|lead|scrum master|qa|tester|programmer)\b",
+            text,
+        )
+    )
+
+
 def _looks_like_sentence_fragment(token: str) -> bool:
     lowered = token.lower().strip()
     if not lowered:
@@ -3212,6 +3285,62 @@ def _clean_experience_title(value: Any) -> str | None:
     title = re.sub(r"(?i)\s+responsibilities?\s*:?\s*$", "", title).strip(" :-")
     title = re.sub(r"(?i)^responsibilities?\s*:?\s*", "", title).strip(" :-")
     return _clean_string(title)
+
+
+def _looks_like_month_or_date_fragment(value: Any) -> bool:
+    text = _clean_string(value)
+    if not text:
+        return False
+    lowered = text.lower().strip()
+    lowered = re.sub(r"[^a-z0-9 ]+", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    if not lowered:
+        return False
+    month_words = set(MONTH_MAP.keys()) | {"present", "current", "currently", "till", "date", "to"}
+    tokens = [tok for tok in lowered.split() if tok]
+    if not tokens:
+        return False
+    if all(tok in month_words or re.fullmatch(r"\d{2,4}", tok) for tok in tokens):
+        return True
+    if re.fullmatch(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*", lowered):
+        return True
+    return False
+
+
+def _looks_like_education_artifact_experience_entry(entry: dict[str, Any]) -> bool:
+    title = _clean_string(entry.get("title")) or ""
+    company = _clean_string(entry.get("company")) or ""
+    description = _clean_string(entry.get("description")) or ""
+    merged = f"{title} {company} {description}".strip().lower()
+    if not merged:
+        return False
+
+    has_edu_signal = bool(
+        re.search(
+            r"\b(educational documents|masters?|bachelors?|ph\.?d|diploma|university|college|school|campus)\b",
+            merged,
+        )
+    )
+    if not has_edu_signal:
+        return False
+
+    has_job_signal = bool(
+        re.search(
+            r"\b(developer|engineer|analyst|manager|architect|consultant|administrator|coordinator|lead|scrum|qa|tester|intern|director)\b",
+            merged,
+        )
+    )
+    if has_job_signal:
+        return False
+
+    # Strongly treat line-noise placeholders as malformed non-job rows.
+    if company in {".", "-", "--"}:
+        return True
+    if _looks_like_month_or_date_fragment(company):
+        return True
+    if re.search(r"\b(university|college|school)\b", (title or "").lower()):
+        return True
+    return False
 
 
 def _extract_title_from_description_prefix(value: Any) -> str | None:

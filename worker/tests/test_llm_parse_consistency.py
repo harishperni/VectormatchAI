@@ -250,6 +250,60 @@ Bachelor of Computer Science
         self.assertEqual(entries[0].get("title"), "Java / J2EE Developer")
         self.assertEqual(entries[0].get("location"), "Chennai, India")
 
+    def test_filters_education_rows_from_experience_and_repairs_month_company_noise(self) -> None:
+        parsed = {
+            "current_last_job": "FULL STACK JAVA DEVELOPER",
+            "experience_entries": [
+                {
+                    "title": "FULL STACK JAVA DEVELOPER",
+                    "company": "FEBURARY",
+                    "location": None,
+                    "start_date": "2016",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "MEDINTELLI Product is certified electronic health records.",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+                {
+                    "title": "MARSHALL UNIVERISTY, HUNTINGTON, WEST VIRGINA.",
+                    "company": ".",
+                    "location": None,
+                    "start_date": "2016-01",
+                    "end_date": "2017-05",
+                    "is_current": False,
+                    "description": "MASTERS IN MOBILE AND UBQUTIOUS COMPUTING.",
+                    "skills_used": [],
+                    "achievements": [],
+                },
+            ],
+        }
+        raw_text = """
+PROFESSIONAL EXPERIENCE:
+SYSINTELLIINC, SANDIEGO, CA.
+FEBURARY 2016 – TILL DATE
+FULL STACK JAVA DEVELOPER
+MEDINTELLI Product is certified electronic health records for ambulatory practices.
+
+EDUCATIONAL DOCUMENTS
+MASTERS IN COMPUTER SCIENCE.
+MARSHALL UNIVERISTY, HUNTINGTON, WEST VIRGINA.
+JAN 2016-MAY 2017.
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("company"), "SYSINTELLIINC")
+        self.assertEqual(entries[0].get("title"), "FULL STACK JAVA DEVELOPER")
+        self.assertFalse(
+            any(
+                "marshall univeristy" in str(item.get("title") or "").lower()
+                or "masters in" in str(item.get("description") or "").lower()
+                for item in entries
+            )
+        )
+
     def test_strips_skill_category_prefix_noise(self) -> None:
         parsed = {
             "skills": [

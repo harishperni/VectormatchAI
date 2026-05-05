@@ -951,6 +951,48 @@ UBS Financial Services, Troy, MI Oct'16 – Present
         self.assertIn("microsoft certified system engineer (mcse)", cert_names)
         self.assertNotIn("professional experiences", cert_names)
 
+    def test_repairs_reversed_company_location_state_code_pair(self) -> None:
+        parsed = {
+            "experience_entries": [
+                {
+                    "title": "Java/J2EE Developer",
+                    "company": "PA",
+                    "location": "Premiere Global Services, Pittsburg",
+                    "start_date": "2014-08",
+                    "end_date": "2015-09",
+                    "is_current": False,
+                    "description": "desc",
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "WORK EXPERIENCE")
+        entries = normalized.get("experience_entries", [])
+        self.assertEqual(entries[0].get("company"), "Premiere Global Services")
+        self.assertEqual(entries[0].get("location"), "Pittsburg, PA")
+
+    def test_dedupes_sentence_form_education_duplicates(self) -> None:
+        parsed = {
+            "education": [
+                {
+                    "degree": "Bachelor's",
+                    "field_of_study": "Computer Science Engineering",
+                    "institution": "Jawaharlal Nehru Technological University",
+                    "end_date": "2008-06",
+                },
+                {
+                    "degree": "Bachelor's",
+                    "field_of_study": None,
+                    "institution": "Bachelor's in Computer Science Engineering from Jawaharlal Nehru Technological University",
+                    "end_date": "2008-06",
+                },
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "EDUCATION")
+        education = normalized.get("education", [])
+        self.assertEqual(len(education), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

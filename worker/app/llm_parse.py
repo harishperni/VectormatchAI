@@ -679,8 +679,16 @@ def canonicalize_skill_tokens(skills: Any) -> list[str]:
 
 
 def _normalize_education_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
+    institution = _clean_string(entry.get("institution"))
+    if institution:
+        sentence_inst_match = re.search(
+            r"(?i)\bfrom\s+([A-Za-z][A-Za-z0-9 .&'/-]{2,100}(?:University|Institute|College))\b",
+            institution,
+        )
+        if sentence_inst_match:
+            institution = _clean_string(sentence_inst_match.group(1))
     return {
-        "institution": _clean_string(entry.get("institution")),
+        "institution": institution,
         "degree": _clean_string(entry.get("degree")),
         "field_of_study": _clean_string(entry.get("field_of_study")),
         "start_date": _clean_education_date_string(entry.get("start_date")),
@@ -1065,6 +1073,7 @@ def _dedupe_education_entries(entries: Any) -> list[dict[str, Any]]:
         return []
     deduped: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
+    seen_soft: set[tuple[str, str, str]] = set()
     for item in entries:
         if not isinstance(item, dict):
             continue
@@ -1076,11 +1085,31 @@ def _dedupe_education_entries(entries: Any) -> list[dict[str, Any]]:
                 degree = prefix.strip()
                 field = suffix.strip()
         institution = (_clean_string(item.get("institution")) or "").strip(" .").lower()
+        if institution:
+            sentence_inst_match = re.search(
+                r"(?i)\bfrom\s+([A-Za-z][A-Za-z0-9 .&'/-]{2,100}(?:university|institute|college))\b",
+                institution,
+            )
+            if sentence_inst_match:
+                institution = sentence_inst_match.group(1).strip(" .").lower()
         end_date = (_clean_string(item.get("end_date")) or "").strip().lower()
         key = (degree, field, institution, end_date)
+        degree_bucket = degree
+        if "bachelor" in degree:
+            degree_bucket = "bachelor"
+        elif "master" in degree:
+            degree_bucket = "master"
+        elif "diploma" in degree:
+            degree_bucket = "diploma"
+        elif "phd" in degree or "doctor" in degree:
+            degree_bucket = "doctorate"
+        soft_key = (degree_bucket, institution, end_date)
         if key in seen:
             continue
+        if soft_key in seen_soft:
+            continue
         seen.add(key)
+        seen_soft.add(soft_key)
         deduped.append(item)
     return deduped
 
@@ -1504,6 +1533,15 @@ def _repair_company_location_split(company: str, location: str) -> tuple[str, st
                 if org_part:
                     merged_company = f"{clean_company} {org_part}".strip()
                     return _clean_string(merged_company) or clean_company, region
+
+    # Recover reversed split:
+    # company="PA", location="Premiere Global Services, Pittsburg"
+    if re.fullmatch(r"[A-Z]{2}", clean_company):
+        parts = [part.strip() for part in clean_location.split(",") if part.strip()]
+        if len(parts) == 2:
+            org_part, city_part = parts[0], parts[1]
+            if _looks_like_org_line(org_part) and re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,40}", city_part):
+                return _clean_string(org_part) or org_part, f"{city_part}, {clean_company}"
 
     return clean_company, clean_location
 

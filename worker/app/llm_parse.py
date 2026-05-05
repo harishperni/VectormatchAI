@@ -577,6 +577,12 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         inferred_role = _extract_current_role_from_text(raw_text)
         if inferred_role:
             result["current_last_job"] = inferred_role
+    specific_current_title = _extract_specific_current_title(result.get("experience_entries", []))
+    if specific_current_title and _should_prefer_specific_current_title(
+        result.get("current_last_job"),
+        specific_current_title,
+    ):
+        result["current_last_job"] = specific_current_title
     if _looks_like_company_label(result.get("current_last_job")):
         inferred_role = _extract_current_role_from_text(raw_text)
         if inferred_role:
@@ -3246,6 +3252,45 @@ def derive_current_last_job(experience_entries: list[dict[str, Any]]) -> str | N
                 continue
             return cleaned
     return None
+
+
+def _extract_specific_current_title(experience_entries: Any) -> str | None:
+    if not isinstance(experience_entries, list):
+        return None
+    current_entries = [e for e in experience_entries if isinstance(e, dict) and e.get("is_current") is True]
+    candidates = current_entries if current_entries else [e for e in experience_entries if isinstance(e, dict)]
+    for entry in candidates:
+        title = _clean_experience_title(entry.get("title"))
+        if title:
+            return title
+    return None
+
+
+def _should_prefer_specific_current_title(current_last_job: Any, candidate_title: str) -> bool:
+    existing = _clean_experience_title(current_last_job)
+    candidate = _clean_experience_title(candidate_title)
+    if not candidate:
+        return False
+    if not existing:
+        return True
+    if existing.lower() == candidate.lower():
+        return False
+
+    existing_l = existing.lower()
+    candidate_l = candidate.lower()
+    generic_roles = {
+        "business analyst",
+        "senior business analyst",
+        "sr business analyst",
+        "sr. business analyst",
+        "business systems analyst",
+        "analyst",
+    }
+    if existing_l in generic_roles and len(candidate_l) > len(existing_l):
+        return True
+    if existing_l in candidate_l and ("," in candidate or "/" in candidate):
+        return True
+    return False
 
 
 def calculate_experience_years_from_entries(entries: list[dict[str, Any]]) -> float | None:

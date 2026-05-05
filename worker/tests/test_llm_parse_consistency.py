@@ -634,6 +634,26 @@ Wrote SQL queries to test the database.
         entries = normalized.get("experience_entries", [])
         self.assertEqual(len(entries), 1)
 
+    def test_prefers_specific_current_entry_title_over_generic_current_last_job(self) -> None:
+        parsed = {
+            "current_last_job": "Business Analyst",
+            "experience_entries": [
+                {
+                    "title": "Business Analyst, Commercial Banking IT",
+                    "company": "Citi Bank",
+                    "location": "NJ",
+                    "start_date": "2016-08",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "desc",
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ],
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "PROFESSIONAL EXPERIENCE")
+        self.assertEqual(normalized.get("current_last_job"), "Business Analyst, Commercial Banking IT")
+
     def test_client_block_fallback_and_pmp_title_guard(self) -> None:
         parsed = {
             "current_last_job": "PMP Expiration Date: February 6th 2020",

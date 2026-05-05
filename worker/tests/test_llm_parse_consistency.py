@@ -880,7 +880,7 @@ Master's Degree in Computer Applications
         self.assertGreaterEqual(len(education), 1)
         self.assertIn("Master", str(education[0].get("degree") or ""))
 
-    def test_strips_technical_skillset_prefix_noise_tokens(self) -> None:
+    def test_preserves_explicit_skillset_prefix_tokens(self) -> None:
         parsed = {
             "skills": [
                 "Management Tools JIRA",
@@ -895,15 +895,14 @@ Master's Degree in Computer Applications
         }
         normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
         skills = normalized.get("skills", [])
-        self.assertIn("jira", skills)
-        self.assertIn("hp alm", skills)
-        self.assertIn("sharepoint", skills)
-        self.assertIn("waterfall", skills)
-        self.assertIn("facets 4.31", skills)
-        self.assertIn("ms visio", skills)
-        self.assertIn("oracle 10g", skills)
-        self.assertIn("ms office", skills)
-        self.assertFalse(any(item.startswith("and ") for item in skills))
+        self.assertIn("management tools jira", skills)
+        self.assertIn("hp alm quality center", skills)
+        self.assertIn("and sharepoint", skills)
+        self.assertIn("sdlc techniques waterfall", skills)
+        self.assertIn("healthcare technologies facets 4.31", skills)
+        self.assertIn("microsoft tool ms-visio", skills)
+        self.assertIn("rdbms oracle 10g", skills)
+        self.assertIn("and ms-office", skills)
 
     def test_extracts_missing_title_from_description_prefix(self) -> None:
         parsed = {

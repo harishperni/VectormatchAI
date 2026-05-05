@@ -2663,13 +2663,6 @@ def _normalize_composite_skill_token(token: str) -> str | None:
     if not lowered:
         return None
 
-    if "hp alm" in lowered and "quality center" in lowered:
-        return "HP ALM"
-    if lowered in {"ms-visio", "ms visio"}:
-        return "MS Visio"
-    if lowered in {"ms-office", "ms office"}:
-        return "MS Office"
-
     # Collapse composite "application server" phrase noise.
     if "application server" in lowered:
         if "weblogic" in lowered or "web logic" in lowered:
@@ -2692,12 +2685,6 @@ def _strip_skill_category_prefix(value: str) -> str | None:
         "",
         cleaned,
     ).strip()
-    stripped = re.sub(
-        r"(?i)^\s*(management tools?|sdlc techniques?|healthcare technologies?|microsoft tool|database|standards?|rdbms)\s*[:\-–]?\s*",
-        "",
-        stripped,
-    ).strip()
-    stripped = re.sub(r"(?i)^\s*(and|&)\s+", "", stripped).strip()
     stripped = re.sub(r"(?i)^\s*technolog(?:y|ies)\s+like\s+", "", stripped).strip()
     return stripped or None
 

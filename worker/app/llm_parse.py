@@ -735,6 +735,9 @@ def _normalize_company_string(value: Any) -> str | None:
     company = _clean_string(value)
     if not company:
         return None
+    had_client_prefix = bool(re.match(r"(?i)^\s*client\s*:", company))
+    if had_client_prefix:
+        company = re.sub(r"(?i)^\s*client\s*:\s*", "", company).strip()
 
     # Drop label-only fragments that frequently appear in malformed OCR/LLM output.
     if re.fullmatch(r"(?i)\s*(location|duration)\s*:?\s*", company):
@@ -752,6 +755,7 @@ def _normalize_company_string(value: Any) -> str | None:
     cleaned_parts: list[str] = []
     for part in parts:
         fragment = re.sub(r"(?i)\blocation\s*:\s*", "", part).strip()
+        fragment = re.sub(r"(?i)^\s*client\s*:\s*", "", fragment).strip()
         if not fragment:
             continue
         location_fragment = _extract_location_fragment(fragment)
@@ -764,6 +768,9 @@ def _normalize_company_string(value: Any) -> str | None:
                 flags=re.IGNORECASE,
             )
             fragment = re.sub(r"\s+", " ", fragment).strip(" |,-")
+        if had_client_prefix:
+            # "Client: McDonald's, Oak Brook, IL (HCL America)" -> "McDonald's"
+            fragment = re.sub(r"\s*\([^)]*\)\s*$", "", fragment).strip(" |,-")
         if not fragment or _looks_like_location_text(fragment):
             continue
         cleaned_parts.append(fragment)
@@ -799,15 +806,21 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
     for entry in normalized_entries:
         item = dict(entry)
         raw_company = _clean_string(item.get("company"))
+        parsed_client_company = None
+        parsed_client_location = None
+        if raw_company:
+            parsed_client_company, parsed_client_location = _parse_client_company_location_from_line(raw_company)
         item["company"] = _normalize_company_string(raw_company)
         item["title"] = _clean_experience_title(item.get("title"))
+        if parsed_client_company:
+            item["company"] = parsed_client_company
         if item["title"] and re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", item["title"]):
             item["title"] = None
         if not item.get("title") and raw_company and re.match(r"(?i)^\s*role\s*:", raw_company):
             derived_title = _clean_experience_title(re.sub(r"(?i)^\s*role\s*:\s*", "", raw_company))
             if derived_title:
                 item["title"] = derived_title
-        item["location"] = _clean_string(item.get("location")) or _extract_location_fragment(
+        item["location"] = parsed_client_location or _clean_string(item.get("location")) or _extract_location_fragment(
             _clean_string(entry.get("company")) or ""
         )
         if item.get("company") and not item.get("location"):
@@ -1766,6 +1779,14 @@ def _extract_location_fragment(value: str) -> str | None:
     line = _clean_string(value)
     if not line:
         return None
+    # Prefer trailing "City, ST" when a client header contains organization, city, state.
+    comma_parts = [part.strip() for part in line.split(",") if part.strip()]
+    if len(comma_parts) >= 3:
+        tail = f"{comma_parts[-2]}, {comma_parts[-1]}"
+        tail = re.sub(r"\s*\([^)]*\)\s*$", "", tail).strip()
+        if _looks_like_location_text(tail):
+            return tail
+
     trailing_match = re.search(
         r"\b([A-Za-z][A-Za-z .'-]{0,40},\s*(?:[A-Z]{2}|[A-Za-z]+)(?:,\s*(?:USA|US|United States))?)\s*$",
         line,
@@ -2190,8 +2211,9 @@ def _extract_experience_entries_from_text(text: str) -> list[dict[str, Any]]:
 
         next_entry_idx = date_line_indexes[pos + 1] if pos + 1 < len(date_line_indexes) else len(lines)
         line_without_dates = _strip_date_range_from_text(line)
-        location = _extract_location_fragment(line_without_dates)
-        company = _normalize_company_string(line_without_dates)
+        client_company, client_location = _parse_client_company_location_from_line(line_without_dates)
+        location = client_location or _extract_location_fragment(line_without_dates)
+        company = client_company or _normalize_company_string(line_without_dates)
         if not company and location:
             org_from_loc, loc_from_loc = _split_org_and_region_from_line(location)
             if org_from_loc:
@@ -2923,7 +2945,7 @@ def _should_keep_skill_token(token: str, dynamic_short_allowlist: set[str] | Non
         r"react|angular|vue|node|spring|hibernate|django|flask|"
         r"aws|azure|gcp|docker|kubernetes|jenkins|git|jira|confluence|"
         r"tableau|power\s*bi|power\s*apps|power\s*automate|informatica|ssis|ssas|ssrs|olap|qtp|mule|salesforce|apex|soql|wsdl|soap|rest|api|"
-        r"agile|scrum|kanban|waterfall|rup|tdd|uat|erwin|visio|postman|sharepoint|eclipse|arcgis|mainframes?|hp\s*alm|hpqc"
+        r"agile|scrum|kanban|waterfall|rup|tdd|uat|erwin|visio|postman|sharepoint|eclipse|arcgis|mainframes?|hp\s*alm|hpqc|unix|linux|sybase"
     )
     if re.search(rf"(?i)\b({tech_hints})\b", normalized):
         return True
@@ -2984,7 +3006,7 @@ def _split_skill_candidate(value: str) -> list[str]:
     # First split by explicit separators.
     parts = [
         _clean_string(part)
-        for part in re.split(r"\s*[|,;/]\s*|\s+\band\b\s+", cleaned, flags=re.IGNORECASE)
+        for part in re.split(r"\s*[|,;/]\s*|\s+\band\b\s+|\s*&\s*", cleaned, flags=re.IGNORECASE)
     ]
     parts = [part for part in parts if part]
     if len(parts) > 1:
@@ -3129,6 +3151,28 @@ def _clean_experience_title(value: Any) -> str | None:
     title = re.sub(r"(?i)\s+responsibilities?\s*:?\s*$", "", title).strip(" :-")
     title = re.sub(r"(?i)^responsibilities?\s*:?\s*", "", title).strip(" :-")
     return _clean_string(title)
+
+
+def _parse_client_company_location_from_line(value: Any) -> tuple[str | None, str | None]:
+    line = _clean_string(value)
+    if not line or not re.match(r"(?i)^\s*client\s*:", line):
+        return None, None
+
+    body = re.sub(r"(?i)^\s*client\s*:\s*", "", line).strip()
+    body = _strip_date_range_from_text(body)
+    body = re.sub(r"\s*\([^)]*\)\s*$", "", body).strip(" |,-")
+    if not body:
+        return None, None
+
+    parts = [part.strip() for part in body.split(",", 1)]
+    if len(parts) == 1:
+        return _clean_string(parts[0]), None
+    company = _clean_string(parts[0])
+    location = _clean_string(parts[1])
+    if location:
+        location = re.sub(r"\s*\([^)]*\)\s*$", "", location).strip(" |,-")
+        location = _clean_string(location)
+    return company, location
 
 
 def _split_org_and_region_from_line(value: str) -> tuple[str | None, str | None]:

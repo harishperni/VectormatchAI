@@ -654,6 +654,45 @@ Wrote SQL queries to test the database.
         normalized = _normalize_llm_parse_output_v2(parsed, "PROFESSIONAL EXPERIENCE")
         self.assertEqual(normalized.get("current_last_job"), "Business Analyst, Commercial Banking IT")
 
+    def test_client_header_extracts_clean_company_and_city_state_location(self) -> None:
+        parsed = {"experience_entries": []}
+        raw_text = """
+PROJECTS EXPERIENCE
+Client: McDonald's, Oak Brook, IL (HCL America) Feb 2017 - Present
+Role: Agile Project Manager
+Responsibilities:
+Managed teams across time zones.
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("company"), "McDonald's")
+        self.assertEqual(entries[0].get("location"), "Oak Brook, IL")
+
+    def test_splits_ampersand_skill_tokens(self) -> None:
+        parsed = {"skills": ["Unix & SQL Server", "JUnit & Sybase"]}
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        skills = normalized.get("skills", [])
+        self.assertIn("unix", skills)
+        self.assertIn("sql server", skills)
+        self.assertIn("junit", skills)
+        self.assertIn("sybase", skills)
+
+    def test_client_line_with_multi_country_keeps_company_and_location(self) -> None:
+        parsed = {"experience_entries": []}
+        raw_text = """
+PROJECTS EXPERIENCE
+Client: PwC , USA & India (TCS) July 2014 – Feb 2017
+Role: Agile Project Manager
+Responsibilities:
+Managed projects in fast paced IT environment.
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("company"), "PwC")
+        self.assertEqual(entries[0].get("location"), "USA & India")
+
     def test_client_block_fallback_and_pmp_title_guard(self) -> None:
         parsed = {
             "current_last_job": "PMP Expiration Date: February 6th 2020",

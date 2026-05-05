@@ -419,7 +419,12 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
             if isinstance(entry, dict)
         ]
         result["certifications"] = [
-            entry for entry in result["certifications"] if not _is_empty_certification(entry)
+            entry
+            for entry in result["certifications"]
+            if (
+                not _is_empty_certification(entry)
+                and not _is_invalid_certification_name(entry.get("name"))
+            )
         ]
 
     result["experience_entries"] = sort_experience_entries(result["experience_entries"])
@@ -844,6 +849,10 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
             item["company"] = repaired_company
             item["location"] = repaired_location
         item["description"] = _trim_experience_description(item.get("description"))
+        if not item.get("title"):
+            inferred_title = _extract_title_from_description_prefix(item.get("description"))
+            if inferred_title:
+                item["title"] = inferred_title
         item["skills_used"] = _sanitize_skills_used(_unique_clean_strings(item.get("skills_used", []))) if isinstance(item.get("skills_used"), list) else []
         item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
         if isinstance(item.get("title"), str) and re.fullmatch(r"(?i)\s*responsibilities\s*:?\s*", item["title"]):
@@ -1085,6 +1094,18 @@ def _is_empty_certification(certification: dict[str, Any]) -> bool:
     )
 
 
+def _is_invalid_certification_name(value: Any) -> bool:
+    name = _clean_string(value)
+    if not name:
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?i)\s*(professional experiences?|work experiences?|experience|summary|technical skills?)\s*:?\s*",
+            name,
+        )
+    )
+
+
 def _has_skills_section(text: str) -> bool:
     return bool(
         re.search(
@@ -1219,7 +1240,7 @@ def _extract_section_block(text: str, header_pattern: str, max_lines: int = 60) 
             continue
 
         if re.fullmatch(
-            r"(?i)\s*(professional summary|summary|professional experience|work experience|experience|education(?:al details)?|technical skills?|skills?|projects?|certifications?|languages?)\s*:?\s*",
+            r"(?i)\s*(professional summary|summary|professional experiences?|work experiences?|experience|education(?:al details)?|technical skills?|skills?|projects?|certifications?|languages?)\s*:?\s*",
             line,
         ):
             break
@@ -1361,6 +1382,8 @@ def _extract_certifications_from_text(text: str) -> list[dict[str, Any]]:
 
     certs: list[dict[str, Any]] = []
     for line in block:
+        if re.fullmatch(r"(?i)\s*professional experiences?\s*:?\s*", line.strip()):
+            continue
         if not re.search(r"(certified|certification|professional|psm|csm|istqb|six sigma|ncfm|qtp|quality center|analytics|adwords|mta|toastmasters)", line, re.IGNORECASE):
             continue
         name = _clean_string(re.sub(r"^[•*\-\s]+", "", line))
@@ -2640,6 +2663,13 @@ def _normalize_composite_skill_token(token: str) -> str | None:
     if not lowered:
         return None
 
+    if "hp alm" in lowered and "quality center" in lowered:
+        return "HP ALM"
+    if lowered in {"ms-visio", "ms visio"}:
+        return "MS Visio"
+    if lowered in {"ms-office", "ms office"}:
+        return "MS Office"
+
     # Collapse composite "application server" phrase noise.
     if "application server" in lowered:
         if "weblogic" in lowered or "web logic" in lowered:
@@ -2662,6 +2692,12 @@ def _strip_skill_category_prefix(value: str) -> str | None:
         "",
         cleaned,
     ).strip()
+    stripped = re.sub(
+        r"(?i)^\s*(management tools?|sdlc techniques?|healthcare technologies?|microsoft tool|database|standards?|rdbms)\s*[:\-–]?\s*",
+        "",
+        stripped,
+    ).strip()
+    stripped = re.sub(r"(?i)^\s*(and|&)\s+", "", stripped).strip()
     stripped = re.sub(r"(?i)^\s*technolog(?:y|ies)\s+like\s+", "", stripped).strip()
     return stripped or None
 
@@ -3151,6 +3187,19 @@ def _clean_experience_title(value: Any) -> str | None:
     title = re.sub(r"(?i)\s+responsibilities?\s*:?\s*$", "", title).strip(" :-")
     title = re.sub(r"(?i)^responsibilities?\s*:?\s*", "", title).strip(" :-")
     return _clean_string(title)
+
+
+def _extract_title_from_description_prefix(value: Any) -> str | None:
+    desc = _clean_string(value)
+    if not desc:
+        return None
+    match = re.match(
+        r"(?i)^\s*((?:sr\.?|senior)?\s*business(?:\s+systems|\s+quality)?\s+analyst(?:\s*/\s*project\s+coordinator|\s*/\s*scrum\s*master)?)\b",
+        desc,
+    )
+    if not match:
+        return None
+    return _clean_experience_title(match.group(1))
 
 
 def _parse_client_company_location_from_line(value: Any) -> tuple[str | None, str | None]:

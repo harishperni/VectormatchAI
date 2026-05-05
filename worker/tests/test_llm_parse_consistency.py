@@ -880,6 +880,78 @@ Master's Degree in Computer Applications
         self.assertGreaterEqual(len(education), 1)
         self.assertIn("Master", str(education[0].get("degree") or ""))
 
+    def test_strips_technical_skillset_prefix_noise_tokens(self) -> None:
+        parsed = {
+            "skills": [
+                "Management Tools JIRA",
+                "HP ALM (Quality Center",
+                "and SharePoint",
+                "SDLC Techniques Waterfall",
+                "HealthCare Technologies Facets 4.31",
+                "Microsoft Tool MS-Visio",
+                "RDBMS – Oracle 10g",
+                "and MS-office",
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        skills = normalized.get("skills", [])
+        self.assertIn("jira", skills)
+        self.assertIn("hp alm", skills)
+        self.assertIn("sharepoint", skills)
+        self.assertIn("waterfall", skills)
+        self.assertIn("facets 4.31", skills)
+        self.assertIn("ms visio", skills)
+        self.assertIn("oracle 10g", skills)
+        self.assertIn("ms office", skills)
+        self.assertFalse(any(item.startswith("and ") for item in skills))
+
+    def test_extracts_missing_title_from_description_prefix(self) -> None:
+        parsed = {
+            "experience_entries": [
+                {
+                    "title": None,
+                    "company": "UBS Financial Services",
+                    "location": "Troy, MI",
+                    "start_date": "2016-10",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "Sr. Business Analyst/Project Coordinator Project: Risk management application ...",
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "PROFESSIONAL EXPERIENCE")
+        entries = normalized.get("experience_entries", [])
+        self.assertEqual(entries[0].get("title"), "Sr. Business Analyst/Project Coordinator")
+
+    def test_certification_section_ignores_professional_experiences_header(self) -> None:
+        parsed = {"certifications": []}
+        raw_text = """
+Certifications
+Microsoft Certified System Engineer (MCSE)
+Cisco Certified Network Associate (CCNA)
+Professional Experiences
+UBS Financial Services, Troy, MI Oct'16 – Present
+""".strip()
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        cert_names = [str(item.get("name") or "").lower() for item in normalized.get("certifications", [])]
+        self.assertIn("microsoft certified system engineer (mcse)", cert_names)
+        self.assertIn("cisco certified network associate (ccna)", cert_names)
+        self.assertNotIn("professional experiences", cert_names)
+
+    def test_drops_section_headers_from_model_certification_list(self) -> None:
+        parsed = {
+            "certifications": [
+                {"name": "Microsoft Certified System Engineer (MCSE)"},
+                {"name": "Professional Experiences"},
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "CERTIFICATIONS")
+        cert_names = [str(item.get("name") or "").lower() for item in normalized.get("certifications", [])]
+        self.assertIn("microsoft certified system engineer (mcse)", cert_names)
+        self.assertNotIn("professional experiences", cert_names)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3006,7 +3006,7 @@ def _split_skill_candidate(value: str) -> list[str]:
     # First split by explicit separators.
     parts = [
         _clean_string(part)
-        for part in re.split(r"\s*[|,;/]\s*|\s+\band\b\s+|\s*&\s*", cleaned, flags=re.IGNORECASE)
+        for part in re.split(r"\s*[|,;]\s*|\s+/\s+|\s+\band\b\s+|\s*&\s*", cleaned, flags=re.IGNORECASE)
     ]
     parts = [part for part in parts if part]
     if len(parts) > 1:

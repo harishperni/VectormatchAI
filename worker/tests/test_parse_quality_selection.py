@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.main import _choose_best_parse
+from app.main import _choose_best_parse, build_final_payload
 
 
 class ParseQualitySelectionTests(unittest.TestCase):
@@ -63,7 +63,82 @@ Role\\Designation: Project Manager
         self.assertEqual(best.get("full_name"), "Alex Doe")
         self.assertEqual(best.get("email"), "a@b.com")
 
+    def test_final_payload_repairs_akhil_header_fields(self) -> None:
+        parsed = {
+            "full_name": "Sr. Business Systems Analyst",
+            "candidate_location": "8+ years of intensifying experience in multiple roles as Business Analyst, Business Systems Analyst, Scrum Master and achieved titles.",
+            "current_last_job": "Sr. Business Systems Analyst/ Scrum Master",
+            "skills": ["Java", "JIRA", "SharePoint"],
+            "skills_raw": ["Java", "JIRA", "SharePoint"],
+            "education": [],
+            "highest_degree": "Master",
+            "certifications": [
+                {"name": "Scrum Master Accredited Certification (SMAC).", "issuer": None, "date": None, "credential_id": None},
+                {"name": "Six Sigma Green Belt certified.", "issuer": None, "date": None, "credential_id": None},
+            ],
+            "experience_entries": [
+                {
+                    "title": "Sr. Business Systems Analyst/ Scrum Master",
+                    "company": "Client: JPMorgan Chase",
+                    "location": "Wilmington, Delaware",
+                    "start_date": "2016-03",
+                    "end_date": "Present",
+                    "is_current": True,
+                }
+            ],
+        }
+        text = """
+Akhil
+Sr. Business Systems Analyst
+akhil.mohan0109@gmail.com
+Phone no: 510-953-0677 Professional Summary:
+8+ years of intensifying experience in multiple roles as Business Analyst, Business Systems Analyst, Scrum Master.
+Professional Work Experience:
+Client: JPMorgan Chase MAR 2016 to Till Date
+Location: Wilmington, Delaware.
+Role: Sr. Business Systems Analyst/ Scrum Master
+Education: Bachelor of Technology, JNTU, Hyderabad.
+Certifications:
+Professional Scrum Master (PSM).
+Scrum Master Accredited Certification (SMAC).
+Six Sigma Green Belt certified.
+""".strip()
+
+        final_payload = build_final_payload(parsed, text)
+        cert_names = [str(item.get("name") or "") for item in final_payload.get("certifications", [])]
+
+        self.assertEqual(final_payload.get("full_name"), "Akhil")
+        self.assertEqual(final_payload.get("candidate_location"), "Wilmington, Delaware")
+        self.assertEqual(final_payload.get("highest_degree"), "Bachelor of Technology")
+        self.assertEqual(final_payload.get("education")[0].get("institution"), "JNTU")
+        self.assertIn("Professional Scrum Master (PSM).", cert_names)
+
+    def test_final_payload_prefers_current_entry_location(self) -> None:
+        parsed = {
+            "candidate_location": "Atlas air, NY",
+            "current_last_job": "Sr. Business Analyst",
+            "experience_entries": [
+                {
+                    "title": "Sr. Business Analyst",
+                    "company": "Office of Attorney General Child Support Division, TX",
+                    "location": "TX",
+                    "start_date": "2015-10",
+                    "end_date": "Present",
+                    "is_current": True,
+                },
+                {
+                    "title": "Sr. Business Analyst",
+                    "company": "Atlas air",
+                    "location": "Atlas air, NY",
+                    "start_date": "2014-02",
+                    "end_date": "2015-09",
+                    "is_current": False,
+                },
+            ],
+        }
+        final_payload = build_final_payload(parsed, "WORK EXPERIENCE")
+        self.assertEqual(final_payload.get("candidate_location"), "TX")
+
 
 if __name__ == "__main__":
     unittest.main()
-

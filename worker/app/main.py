@@ -16,15 +16,22 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.llm_parse import (
+    _normalize_llm_parse_output_v2,
     _extract_certifications_from_text,
+    _extract_education_from_text,
     _extract_environment_skills_from_text,
     _extract_experience_entries_from_text,
+    _extract_full_name_from_top,
     _extract_professional_summary_from_text,
     _extract_skills_from_text,
     _extract_volunteering_from_text,
+    _has_certification_section,
+    _looks_like_bad_candidate_location,
+    _looks_like_role_title,
     calculate_experience_years_from_entries,
     canonicalize_skill_tokens_with_unknowns,
     count_date_ranges_in_text,
+    derive_highest_degree,
     derive_current_last_job,
     derive_primary_domain,
     derive_seniority_level,
@@ -452,7 +459,61 @@ def _choose_best_parse(primary: dict[str, Any], recovered: dict[str, Any], norma
 
 
 def build_final_payload(strict_parsed: dict[str, Any], normalized_text: str) -> dict[str, Any]:
-    final_payload = dict(strict_parsed)
+    if not isinstance(strict_parsed, dict):
+        strict_parsed = {}
+    # Always normalize before final enrichment so fallback/merge artifacts
+    # do not override parser repairs (name/location/company/skills cleanup).
+    final_payload = _normalize_llm_parse_output_v2(strict_parsed, normalized_text)
+
+    if _looks_like_role_title(final_payload.get("full_name")):
+        final_payload["full_name"] = _extract_full_name_from_top(normalized_text)
+
+    if _looks_like_bad_candidate_location(final_payload.get("candidate_location")):
+        final_payload["candidate_location"] = None
+    if final_payload.get("candidate_location") is None:
+        for entry in final_payload.get("experience_entries", []):
+            if not isinstance(entry, dict):
+                continue
+            location = entry.get("location")
+            if isinstance(location, str) and not _looks_like_bad_candidate_location(location):
+                final_payload["candidate_location"] = location.strip()
+                break
+    else:
+        # Prefer the current role's location when available and plausible.
+        current_location = None
+        for entry in final_payload.get("experience_entries", []):
+            if not isinstance(entry, dict) or entry.get("is_current") is not True:
+                continue
+            location = entry.get("location")
+            if isinstance(location, str) and not _looks_like_bad_candidate_location(location):
+                current_location = location.strip()
+                break
+        if current_location and current_location != str(final_payload.get("candidate_location")):
+            final_payload["candidate_location"] = current_location
+
+    education = final_payload.get("education")
+    if not isinstance(education, list) or not education:
+        extracted_education = _extract_education_from_text(normalized_text)
+        if extracted_education:
+            final_payload["education"] = extracted_education
+    if final_payload.get("education"):
+        final_payload["highest_degree"] = derive_highest_degree(final_payload["education"])
+
+    if _has_certification_section(normalized_text):
+        extracted_certifications = _extract_certifications_from_text(normalized_text)
+        existing_cert_names = {
+            str(item.get("name") or "").strip().lower()
+            for item in final_payload.get("certifications", [])
+            if isinstance(item, dict)
+        }
+        for item in extracted_certifications:
+            if not isinstance(item, dict):
+                continue
+            cert_name = str(item.get("name") or "").strip().lower()
+            if cert_name and cert_name not in existing_cert_names:
+                final_payload.setdefault("certifications", []).append(item)
+                existing_cert_names.add(cert_name)
+
     raw_skills = final_payload.get("skills_raw")
     if not isinstance(raw_skills, list) or not raw_skills:
         raw_skills = final_payload.get("skills", []) if isinstance(final_payload.get("skills"), list) else []
@@ -462,7 +523,7 @@ def build_final_payload(strict_parsed: dict[str, Any], normalized_text: str) -> 
     final_payload["skills_unknown_tokens"] = unknown_skills
 
     parsed_experience_years = calculate_experience_years_from_entries(
-        strict_parsed.get("experience_entries", [])
+        final_payload.get("experience_entries", [])
     )
     final_payload["experience_years"] = parsed_experience_years
 
@@ -479,12 +540,12 @@ def build_final_payload(strict_parsed: dict[str, Any], normalized_text: str) -> 
             final_payload["experience_years"] = fallback_experience_years
 
     final_payload["primary_domain"] = derive_primary_domain(
-        strict_parsed.get("current_last_job"),
-        strict_parsed.get("experience_entries", []),
+        final_payload.get("current_last_job"),
+        final_payload.get("experience_entries", []),
         final_payload.get("skills", []),
     )
     final_payload["seniority_level"] = derive_seniority_level(
-        strict_parsed.get("current_last_job")
+        final_payload.get("current_last_job")
     )
 
     return final_payload

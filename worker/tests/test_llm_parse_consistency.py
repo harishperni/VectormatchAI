@@ -678,6 +678,13 @@ Managed teams across time zones.
         self.assertIn("junit", skills)
         self.assertIn("sybase", skills)
 
+    def test_preserves_plsql_token(self) -> None:
+        parsed = {"skills": ["Oracle PL/SQL", "PL/SQL"]}
+        normalized = _normalize_llm_parse_output_v2(parsed, "TECHNICAL SKILLS")
+        skills = normalized.get("skills", [])
+        self.assertIn("oracle pl/sql", skills)
+        self.assertIn("pl/sql", skills)
+
     def test_client_line_with_multi_country_keeps_company_and_location(self) -> None:
         parsed = {"experience_entries": []}
         raw_text = """

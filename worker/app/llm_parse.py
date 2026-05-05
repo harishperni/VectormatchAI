@@ -474,6 +474,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
                     continue
                 result["education"].append(item)
                 existing_keys.add(key)
+    result["education"] = _dedupe_education_entries(result.get("education", []))
 
     environment_skills = _extract_environment_skills_from_text(raw_text)
     if not result["skills"] and _has_skills_section(raw_text):
@@ -526,6 +527,16 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         if combined:
             result["skills"] = combined
             result["skills"] = _remove_client_location_skill_leakage(result.get("skills", []), raw_text)
+    if len(result.get("skills", [])) <= 1:
+        low_signal_skills = _extract_explicit_tech_mentions_from_text(raw_text)
+        if low_signal_skills:
+            merged = _postprocess_skills(
+                [*result.get("skills", []), *low_signal_skills],
+                result.get("certifications", []),
+                raw_text,
+            )
+            if merged:
+                result["skills"] = _remove_client_location_skill_leakage(merged, raw_text)
     result["skills_raw"] = _unique_clean_strings(result.get("skills", []))
     canonical_skills, unknown_tokens = canonicalize_skill_tokens_with_unknowns(result.get("skills", []))
     result["skills"] = canonical_skills
@@ -690,13 +701,13 @@ def _normalize_experience_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
 
     raw_company = _clean_string(entry.get("company"))
     normalized_company = _normalize_company_string(raw_company)
-    normalized_title = _clean_string(entry.get("title"))
+    normalized_title = _clean_experience_title(entry.get("title"))
     if (
         not normalized_title
         and raw_company
         and re.match(r"(?i)^\s*role\s*:", raw_company)
     ):
-        normalized_title = _clean_string(re.sub(r"(?i)^\s*role\s*:\s*", "", raw_company))
+        normalized_title = _clean_experience_title(re.sub(r"(?i)^\s*role\s*:\s*", "", raw_company))
 
     return {
         "company": normalized_company,
@@ -783,11 +794,11 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         item = dict(entry)
         raw_company = _clean_string(item.get("company"))
         item["company"] = _normalize_company_string(raw_company)
-        item["title"] = _clean_string(item.get("title"))
+        item["title"] = _clean_experience_title(item.get("title"))
         if item["title"] and re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", item["title"]):
             item["title"] = None
         if not item.get("title") and raw_company and re.match(r"(?i)^\s*role\s*:", raw_company):
-            derived_title = _clean_string(re.sub(r"(?i)^\s*role\s*:\s*", "", raw_company))
+            derived_title = _clean_experience_title(re.sub(r"(?i)^\s*role\s*:\s*", "", raw_company))
             if derived_title:
                 item["title"] = derived_title
         item["location"] = _clean_string(item.get("location")) or _extract_location_fragment(
@@ -1002,6 +1013,26 @@ def _is_empty_education(education: dict[str, Any]) -> bool:
         and not education.get("gpa")
         and not education.get("location")
     )
+
+
+def _dedupe_education_entries(entries: Any) -> list[dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        degree = (_clean_string(item.get("degree")) or "").strip(" .").lower()
+        field = (_clean_string(item.get("field_of_study")) or "").strip(" .").lower()
+        institution = (_clean_string(item.get("institution")) or "").strip(" .").lower()
+        end_date = (_clean_string(item.get("end_date")) or "").strip().lower()
+        key = (degree, field, institution, end_date)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _is_empty_certification(certification: dict[str, Any]) -> bool:
@@ -3038,6 +3069,54 @@ def _clean_date_string(value: Any) -> str | None:
     if inferred_end:
         return inferred_end
     return None
+
+
+def _clean_experience_title(value: Any) -> str | None:
+    title = _clean_string(value)
+    if not title:
+        return None
+    title = re.sub(r"(?i)\s+responsibilities?\s*:?\s*$", "", title).strip(" :-")
+    title = re.sub(r"(?i)^responsibilities?\s*:?\s*", "", title).strip(" :-")
+    return _clean_string(title)
+
+
+def _extract_explicit_tech_mentions_from_text(text: str) -> list[str]:
+    if not text:
+        return []
+
+    # Guarded fallback: only explicit, high-confidence technologies/tools.
+    patterns: list[tuple[str, str]] = [
+        (r"(?i)\bsql\b", "SQL"),
+        (r"(?i)\bjira\b", "JIRA"),
+        (r"(?i)\bms\s*visio\b", "MS Visio"),
+        (r"(?i)\buml\b", "UML"),
+        (r"(?i)\balm\b", "ALM"),
+        (r"(?i)\bservicenow\b", "ServiceNow"),
+        (r"(?i)\bconfluence\b", "Confluence"),
+        (r"(?i)\bagile\b", "Agile"),
+        (r"(?i)\bscrum\b", "Scrum"),
+        (r"(?i)\bwaterfall\b", "Waterfall"),
+        (r"(?i)\bsdlc\b", "SDLC"),
+        (r"(?i)\buat\b", "UAT"),
+        (r"(?i)\bbrd(?:s)?\b", "BRD"),
+        (r"(?i)\bfrd(?:s)?\b", "FRD"),
+        (r"(?i)\bfsd(?:s)?\b", "FSD"),
+        (r"(?i)\btrd(?:s)?\b", "TRD"),
+        (r"(?i)\btcd(?:s)?\b", "TCD"),
+        (r"(?i)\bms\s*outlook\b", "MS Outlook"),
+        (r"(?i)\bms\s*word\b", "MS Word"),
+        (r"(?i)\bms\s*power\s*point\b", "MS PowerPoint"),
+        (r"(?i)\bsharepoint\b", "SharePoint"),
+        (r"(?i)\bwiki/?confluence\b", "Confluence"),
+        (r"(?i)\bsaas\b", "SaaS"),
+        (r"(?i)\bapi(?:'s|s)?\b", "API"),
+    ]
+
+    found: list[str] = []
+    for pattern, label in patterns:
+        if re.search(pattern, text):
+            found.append(label)
+    return _unique_clean_strings(found)
 
 
 def sort_experience_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:

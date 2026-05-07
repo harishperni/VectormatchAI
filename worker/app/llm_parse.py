@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import date
+from difflib import SequenceMatcher
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,31 @@ Important rules:
 - Extract only professional experience into experience_entries.
 - Keep achievements empty unless they are explicitly separated and clearly identifiable.
 - Extract willing_to_relocate only when it is explicitly stated in the resume text.
+
+Field-level constraints:
+- company must be employer/client organization name only.
+- title must be role/designation only.
+- location must be place only (city/state/country) and never a company name.
+- Do not place section headers into fields (e.g., "PROFESSIONAL EXPERIENCE", "SUMMARY", "TECHNICAL SKILLS", "ENVIRONMENT").
+- Do not place comma-separated technology/tool stacks into company or title.
+- If a value is ambiguous/noisy, return null instead of guessing.
+
+Line pattern guidance:
+- "Client: <org>, <location>" => company=<org>, location=<location>.
+- "Role: <title>" or "Role/Designation: <title>" => title=<title>.
+- "Environment: <tools...>" => extract tools into skills, never company/title/current_last_job.
+- "May 2014 - Present" style tokens are dates only, never company names.
+
+Experience integrity rules:
+- Each experience_entries item must represent one job/engagement.
+- Do not include education rows inside experience_entries.
+- Do not use month words/date fragments as company names.
+- current_last_job must be a role title from the most recent/current experience entry, not company/location text.
+
+Skills preservation rules:
+- Preserve explicit tool tokens as written when they appear in skills/environment sections.
+- Keep version variants separately when both are present (e.g., "HP ALM 11" and "HP ALM 11.0").
+- Do not collapse distinct versioned tools into one token.
 """
 
 ATS_RESUME_OUTPUT_SCHEMA_V2 = """{
@@ -513,8 +539,11 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["phone"] = _normalize_phone_value(result.get("phone"), raw_text)
     if result["email"] is None:
         result["email"] = _extract_email_from_text(raw_text)
+    top_name = _extract_full_name_from_top(raw_text)
     if result.get("full_name") is None or _looks_like_role_title(result.get("full_name")):
-        result["full_name"] = _extract_full_name_from_top(raw_text)
+        result["full_name"] = top_name
+    elif _should_prefer_top_name(result.get("full_name"), top_name):
+        result["full_name"] = top_name
     result["skills"] = _postprocess_skills(
         result.get("skills", []),
         result.get("certifications", []),
@@ -901,6 +930,8 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
         if isinstance(item.get("title"), str) and re.fullmatch(r"(?i)\s*responsibilities\s*:?\s*", item["title"]):
             continue
+        if _looks_like_experience_header_noise_entry(item):
+            continue
         if _looks_like_education_artifact_experience_entry(item):
             continue
         if not any(
@@ -928,6 +959,24 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         repaired.append(item)
 
     return repaired
+
+
+def _looks_like_experience_header_noise_entry(entry: dict[str, Any]) -> bool:
+    company = _clean_string(entry.get("company")) or ""
+    title = _clean_string(entry.get("title")) or ""
+    location = _clean_string(entry.get("location")) or ""
+    description = _clean_string(entry.get("description")) or ""
+    start_date = _clean_date_string(entry.get("start_date"))
+    end_date = _clean_date_string(entry.get("end_date"))
+
+    if not company:
+        return False
+    if not re.fullmatch(
+        r"(?i)\s*(professional experience|professional experiences|work experience|experience)\s*:?\s*",
+        company,
+    ):
+        return False
+    return not any([title, location, description, start_date, end_date, bool(entry.get("is_current"))])
 
 
 def _experience_entries_quality_score(entries: Any) -> int:
@@ -1533,7 +1582,7 @@ def _extract_full_name_from_top(text: str) -> str | None:
             # Recover names from OCR lines like:
             # "Mounika10200@gmail.com Mounika Reddy"
             candidate = re.sub(EMAIL_PATTERN, " ", line)
-            candidate = re.sub(r"\+?\d[\d()\-\s]{7,}\d", " ", candidate)
+            candidate = re.sub(r"\+?\(?\d[\d()\-\s]{7,}\d", " ", candidate)
             candidate = re.sub(
                 r"(?i)\b(sr\.?\s*business analyst|business system analyst|business analyst|data analyst|quality analyst|project manager)\b",
                 " ",
@@ -1544,16 +1593,46 @@ def _extract_full_name_from_top(text: str) -> str | None:
             if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", candidate or "") and 2 <= len(candidate.split()) <= 5:
                 return _clean_string(candidate)
             continue
-        if "@" in line:
+        # Recover names from OCR lines like:
+        # "AMULYA KOMATINENI (515)309-1612"
+        line_without_phone = re.sub(r"\+?\(?\d[\d()\-\s]{7,}\d", " ", line)
+        line_without_phone = re.sub(r"\s+", " ", line_without_phone).strip(" |,-")
+        if re.search(r"\b(phone|email|summary|skills|experience|education|certification)\b", line_without_phone, re.IGNORECASE):
             continue
-        if re.search(r"\b(phone|email|summary|skills|experience|education|certification)\b", line, re.IGNORECASE):
+        if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b", line_without_phone):
             continue
-        if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b", line):
-            continue
-        line = re.sub(r"(?i)\bEmployer Details\b", "", line).strip(" ,-")
-        if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line) and 1 <= len(line.split()) <= 5:
-            return _clean_string(line)
+        line_without_phone = re.sub(r"(?i)\bEmployer Details\b", "", line_without_phone).strip(" ,-")
+        if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line_without_phone) and 1 <= len(line_without_phone.split()) <= 5:
+            return _clean_string(line_without_phone)
     return None
+
+
+def _should_prefer_top_name(existing_name: Any, top_name: Any) -> bool:
+    existing = _clean_string(existing_name)
+    candidate = _clean_string(top_name)
+    if not candidate:
+        return False
+    if _looks_like_role_title(candidate):
+        return False
+    if not existing:
+        return True
+    if _looks_like_role_title(existing):
+        return True
+    if existing.lower() == candidate.lower():
+        return False
+
+    ex_parts = existing.lower().split()
+    cand_parts = candidate.lower().split()
+    if not ex_parts or not cand_parts:
+        return False
+    if ex_parts[0] == cand_parts[0]:
+        ex_last = ex_parts[-1]
+        cand_last = cand_parts[-1]
+        if SequenceMatcher(None, ex_last, cand_last).ratio() >= 0.88:
+            return True
+    if SequenceMatcher(None, existing.lower(), candidate.lower()).ratio() >= 0.92:
+        return True
+    return False
 
 
 def _repair_company_location_split(company: str, location: str) -> tuple[str, str]:
@@ -1580,6 +1659,16 @@ def _repair_company_location_split(company: str, location: str) -> tuple[str, st
             org_part, city_part = parts[0], parts[1]
             if _looks_like_org_line(org_part) and re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,40}", city_part):
                 return _clean_string(org_part) or org_part, f"{city_part}, {clean_company}"
+
+    # Recover company suffix leakage into location:
+    # company="YANA Software Pvt.", location="LTD - Hyderabad, INDIA."
+    leak_match = re.match(r"(?i)^\s*(ltd|llc|inc|corp|corporation)\b\s*[-,]\s*(.+)$", clean_location)
+    if leak_match:
+        suffix = leak_match.group(1).upper()
+        rest_location = _clean_string(leak_match.group(2).strip(" .,")) or clean_location
+        if re.search(r"(?i)\bpvt\.?$", clean_company) and not re.search(r"(?i)\bltd\b", clean_company):
+            clean_company = _clean_string(f"{clean_company} {suffix}") or clean_company
+        clean_location = rest_location
 
     return clean_company, clean_location
 

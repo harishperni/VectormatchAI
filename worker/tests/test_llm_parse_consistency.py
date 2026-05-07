@@ -337,6 +337,68 @@ Environment: HP ALM, JIRA, Salesforce.
         self.assertEqual(normalized.get("current_last_job"), "Sr. Business Analyst")
         self.assertEqual(normalized.get("candidate_location"), "Charleston, WV")
 
+    def test_recovers_name_from_top_line_with_phone_and_prefers_cleaner_top_name(self) -> None:
+        parsed = {
+            "full_name": "Amulya Komatini",
+            "experience_entries": [],
+        }
+        raw_text = """
+AMULYA KOMATINENI (515)309-1612
+amulya.javadeveloper@gmail.com
+PROFESSIONAL SUMMARY:
+Java developer with experience.
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        self.assertEqual(normalized.get("full_name"), "AMULYA KOMATINENI")
+
+    def test_repairs_pvt_ltd_company_location_split(self) -> None:
+        parsed = {
+            "experience_entries": [
+                {
+                    "title": "JAVA/J2EE Developer",
+                    "company": "YANA Software Pvt.",
+                    "location": "LTD - Hyderabad, INDIA.",
+                    "start_date": "2008-09",
+                    "end_date": "2009-09",
+                    "is_current": False,
+                }
+            ]
+        }
+        raw_text = "WORK EXPERIENCE"
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertEqual(entries[0].get("company"), "YANA Software Pvt. LTD")
+        self.assertEqual(entries[0].get("location"), "Hyderabad, INDIA")
+
+    def test_drops_header_only_experience_noise_entry(self) -> None:
+        parsed = {
+            "experience_entries": [
+                {
+                    "title": None,
+                    "company": "PROFESSIONAL EXPERIENCE:",
+                    "location": None,
+                    "start_date": None,
+                    "end_date": None,
+                    "is_current": None,
+                    "description": None,
+                },
+                {
+                    "title": "JAVA Full Stack Developer",
+                    "company": "Liberty Mutual",
+                    "location": "Dover, NH",
+                    "start_date": "2017-09",
+                    "end_date": "Present",
+                    "is_current": True,
+                    "description": "Built services.",
+                },
+            ]
+        }
+        normalized = _normalize_llm_parse_output_v2(parsed, "WORK EXPERIENCE")
+        entries = normalized.get("experience_entries", [])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("company"), "Liberty Mutual")
+
     def test_strips_skill_category_prefix_noise(self) -> None:
         parsed = {
             "skills": [

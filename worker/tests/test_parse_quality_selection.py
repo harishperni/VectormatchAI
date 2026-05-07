@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.main import _choose_best_parse, build_final_payload
+from app.main import _choose_best_parse, _choose_best_parse_with_source, build_final_payload
 
 
 class ParseQualitySelectionTests(unittest.TestCase):
@@ -37,6 +37,8 @@ Role\\Designation: Project Manager
         best = _choose_best_parse(primary, recovered, text)
         self.assertEqual(best.get("full_name"), "Alex Doe")
         self.assertEqual(best.get("current_last_job"), "Project Manager")
+        source, _ = _choose_best_parse_with_source(primary, recovered, text)
+        self.assertEqual(source, "recovered")
 
     def test_keeps_primary_when_it_is_stronger(self) -> None:
         text = "PROFESSIONAL EXPERIENCE:\nRole: Analyst\n"
@@ -62,6 +64,8 @@ Role\\Designation: Project Manager
         best = _choose_best_parse(primary, recovered, text)
         self.assertEqual(best.get("full_name"), "Alex Doe")
         self.assertEqual(best.get("email"), "a@b.com")
+        source, _ = _choose_best_parse_with_source(primary, recovered, text)
+        self.assertEqual(source, "primary")
 
     def test_final_payload_repairs_akhil_header_fields(self) -> None:
         parsed = {

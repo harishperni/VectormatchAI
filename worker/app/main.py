@@ -439,7 +439,11 @@ def _clean_str(value: Any) -> str | None:
     return value or None
 
 
-def _choose_best_parse(primary: dict[str, Any], recovered: dict[str, Any], normalized_text: str) -> dict[str, Any]:
+def _choose_best_parse_with_source(
+    primary: dict[str, Any],
+    recovered: dict[str, Any],
+    normalized_text: str,
+) -> tuple[str, dict[str, Any]]:
     merged = _merge_with_recovery(primary, recovered)
     candidates = [
         ("primary", primary, _parse_quality_score(primary, normalized_text)),
@@ -455,6 +459,11 @@ def _choose_best_parse(primary: dict[str, Any], recovered: dict[str, Any], norma
         best_name,
         best_score,
     )
+    return best_name, best_payload
+
+
+def _choose_best_parse(primary: dict[str, Any], recovered: dict[str, Any], normalized_text: str) -> dict[str, Any]:
+    _, best_payload = _choose_best_parse_with_source(primary, recovered, normalized_text)
     return best_payload
 
 
@@ -683,19 +692,23 @@ def process_resume_text(text: str) -> dict[str, Any]:
     normalized_text = normalize_resume_text(text)
 
     strict_parsed: dict[str, Any] | None = None
+    parse_source = "fallback"
     if ENABLE_LLM_PARSE:
         strict_parsed = parse_resume_with_ft_v2(normalized_text)
 
     if strict_parsed is None:
         logger.warning("V2 model parse failed; using strict fallback")
         strict_parsed = extract_resume_features_fallback(normalized_text)
+        parse_source = "fallback"
     else:
         recovered = extract_resume_features_fallback(normalized_text)
         if _needs_parse_recovery(strict_parsed, normalized_text):
             logger.warning("Sparse LLM parse detected; evaluating deterministic recovery candidates")
-        strict_parsed = _choose_best_parse(strict_parsed, recovered, normalized_text)
+        parse_source, strict_parsed = _choose_best_parse_with_source(strict_parsed, recovered, normalized_text)
 
-    return build_final_payload(strict_parsed, normalized_text)
+    final_payload = build_final_payload(strict_parsed, normalized_text)
+    final_payload["parse_source"] = parse_source
+    return final_payload
 
 
 def run_ingestion_worker() -> None:

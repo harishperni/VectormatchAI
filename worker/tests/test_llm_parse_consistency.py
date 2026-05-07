@@ -304,6 +304,39 @@ JAN 2016-MAY 2017.
             )
         )
 
+    def test_repairs_swapped_company_title_for_professional_profile_layout(self) -> None:
+        parsed = {
+            "current_last_job": "West Virginia State Medicaid, Charleston, WV",
+            "experience_entries": [
+                {
+                    "title": "West Virginia State Medicaid, Charleston, WV",
+                    "company": "Sr. Business Analyst",
+                    "end_date": "Present",
+                    "location": None,
+                    "is_current": True,
+                    "start_date": "2014-05",
+                    "description": "Environment: HP ALM, JIRA, Salesforce.",
+                    "skills_used": [],
+                    "achievements": [],
+                }
+            ],
+        }
+        raw_text = """
+PROFESSIONAL PROFILE
+West Virginia State Medicaid, Charleston, WV
+Sr. Business Analyst MAY 2014–Present
+Environment: HP ALM, JIRA, Salesforce.
+""".strip()
+
+        normalized = _normalize_llm_parse_output_v2(parsed, raw_text)
+        entries = normalized.get("experience_entries", [])
+        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("company"), "West Virginia State Medicaid")
+        self.assertEqual(entries[0].get("title"), "Sr. Business Analyst")
+        self.assertEqual(entries[0].get("location"), "Charleston, WV")
+        self.assertEqual(normalized.get("current_last_job"), "Sr. Business Analyst")
+        self.assertEqual(normalized.get("candidate_location"), "Charleston, WV")
+
     def test_strips_skill_category_prefix_noise(self) -> None:
         parsed = {
             "skills": [

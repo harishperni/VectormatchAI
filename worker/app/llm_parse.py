@@ -588,6 +588,17 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         specific_current_title,
     ):
         result["current_last_job"] = specific_current_title
+    if specific_current_title and isinstance(result.get("current_last_job"), str):
+        current_value = _clean_string(result.get("current_last_job")) or ""
+        current_company = None
+        for entry in result.get("experience_entries", []):
+            if isinstance(entry, dict) and entry.get("is_current") is True:
+                current_company = _clean_string(entry.get("company"))
+                break
+        if current_company and current_value.lower() == current_company.lower():
+            result["current_last_job"] = specific_current_title
+        elif "," in current_value and not _looks_like_probable_job_title(current_value):
+            result["current_last_job"] = specific_current_title
     if _looks_like_company_label(result.get("current_last_job")):
         inferred_role = _extract_current_role_from_text(raw_text)
         if inferred_role:
@@ -827,6 +838,21 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         if _looks_like_month_or_date_fragment(item.get("company")):
             item["company"] = None
         item["title"] = _clean_experience_title(item.get("title"))
+        if item.get("company") and item.get("title"):
+            company_text = _clean_string(item.get("company")) or ""
+            title_text = _clean_string(item.get("title")) or ""
+            if _looks_like_probable_job_title(company_text) and (
+                _looks_like_org_line(title_text) or _extract_location_fragment(title_text) is not None
+            ):
+                swapped_title = _clean_experience_title(company_text)
+                swapped_company = _normalize_company_string(title_text)
+                if swapped_title and swapped_company:
+                    item["title"] = swapped_title
+                    item["company"] = swapped_company
+                    if not item.get("location"):
+                        loc = _extract_location_fragment(title_text)
+                        if loc:
+                            item["location"] = loc
         if parsed_client_company:
             item["company"] = parsed_client_company
         if item["title"] and re.match(r"(?i)^\s*(environment|environment\\tools|tools)\s*[:\\]", item["title"]):
@@ -2493,7 +2519,7 @@ def _extract_work_experience_block(text: str) -> str:
     for i, raw in enumerate(lines):
         line = raw.strip()
         if start_idx is None and re.fullmatch(
-            r"(?i)(work experience|professional experience|employment history|career history|work history|relevant experience|industry experience|consulting experience|experience)",
+            r"(?i)(work experience|professional experience|professional profile|employment history|career history|work history|relevant experience|industry experience|consulting experience|experience)",
             line.rstrip(":"),
         ):
             start_idx = i + 1

@@ -703,7 +703,7 @@ def process_resume_text(text: str) -> dict[str, Any]:
     else:
         recovered = extract_resume_features_fallback(normalized_text)
         if _needs_parse_recovery(strict_parsed, normalized_text):
-            logger.warning("Sparse LLM parse detected; evaluating deterministic recovery candidates")
+            logger.warning("Sparse LLM parse detected; evaluating fallback recovery candidates")
         parse_source, strict_parsed = _choose_best_parse_with_source(strict_parsed, recovered, normalized_text)
 
     final_payload = build_final_payload(strict_parsed, normalized_text)

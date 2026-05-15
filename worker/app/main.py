@@ -697,7 +697,7 @@ def process_resume_text(text: str) -> dict[str, Any]:
         strict_parsed = parse_resume_with_ft_v2(normalized_text)
 
     if strict_parsed is None:
-        logger.warning("V2 parse unavailable; using strict fallback")
+        logger.warning("V2 parse unavailable; using deterministic fallback")
         strict_parsed = extract_resume_features_fallback(normalized_text)
         parse_source = "fallback"
     else:

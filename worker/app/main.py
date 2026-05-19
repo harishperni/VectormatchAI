@@ -452,7 +452,7 @@ def _choose_best_parse_with_source(
     ]
     best_name, best_payload, best_score = max(candidates, key=lambda item: item[2])
     logger.info(
-        "parse quality scores primary=%.2f merged=%.2f recovered=%.2f selected=%s(%.2f)",
+        "parse quality scores primary=%.2f merged=%.2f fallback=%.2f selected=%s(%.2f)",
         candidates[0][2],
         candidates[1][2],
         candidates[2][2],

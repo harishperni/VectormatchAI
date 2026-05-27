@@ -713,7 +713,7 @@ def process_resume_text(text: str) -> dict[str, Any]:
 
 def run_ingestion_worker() -> None:
     client = redis.from_url(REDIS_URL, decode_responses=True)
-    print(f"Worker connected to Redis at {REDIS_URL}")
+    print(f"Worker connected to Redis: {REDIS_URL}")
     print(f"Listening queue: {INGESTION_QUEUE_KEY}")
 
     while True:

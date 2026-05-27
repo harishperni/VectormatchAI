@@ -729,6 +729,10 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
         result["email"] = _extract_email_from_text(raw_text)
     if result.get("full_name") is None or _looks_like_role_title(result.get("full_name")):
         result["full_name"] = _extract_full_name_from_top(raw_text)
+    else:
+        top_full_name = _extract_full_name_from_top(raw_text)
+        if _should_prefer_top_full_name(result.get("full_name"), top_full_name):
+            result["full_name"] = top_full_name
     result["skills"] = _postprocess_skills(
         result.get("skills", []),
         result.get("certifications", []),
@@ -1159,6 +1163,20 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
             continue
 
         if re.fullmatch(r"(?i)[a-z ]+:", company_text):
+            continue
+        if (
+            _looks_like_sentence_fragment(_clean_string(item.get("company")) or "")
+            and not any(
+                [
+                    _clean_string(item.get("title")),
+                    _clean_string(item.get("location")),
+                    _clean_date_string(item.get("start_date")),
+                    _clean_date_string(item.get("end_date")),
+                    bool(item.get("is_current")),
+                    _clean_string(item.get("description")),
+                ]
+            )
+        ):
             continue
         if _looks_like_education_artifact_experience_entry(item):
             continue
@@ -1827,9 +1845,32 @@ def _extract_full_name_from_top(text: str) -> str | None:
         if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b", line):
             continue
         line = re.sub(r"(?i)\bEmployer Details\b", "", line).strip(" ,-")
+        line = re.sub(r"\+?\(?\d[\d()\-\s]{7,}\d", " ", line)
+        line = re.sub(r"\s+", " ", line).strip(" ,-")
         if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line) and 1 <= len(line.split()) <= 5:
             return _clean_string(line)
     return None
+
+
+def _should_prefer_top_full_name(current_name: Any, top_name: Any) -> bool:
+    current = _clean_string(current_name)
+    candidate = _clean_string(top_name)
+    if not current or not candidate:
+        return False
+
+    current_norm = re.sub(r"[^a-z]", "", current.lower())
+    candidate_norm = re.sub(r"[^a-z]", "", candidate.lower())
+    if not current_norm or not candidate_norm or current_norm == candidate_norm:
+        return False
+
+    current_words = current.split()
+    candidate_words = candidate.split()
+    if not (2 <= len(current_words) <= 5 and len(current_words) == len(candidate_words)):
+        return False
+
+    same_first_name = current_words[0].lower() == candidate_words[0].lower()
+    near_match = current_norm.startswith(candidate_norm) or candidate_norm.startswith(current_norm)
+    return same_first_name and near_match
 
 
 def _repair_company_location_split(company: str, location: str) -> tuple[str, str]:

@@ -10,7 +10,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import date
-from difflib import SequenceMatcher
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -24,50 +23,76 @@ LLM_PARSE_MODEL = os.getenv(
 LLM_PARSE_TIMEOUT = int(os.getenv("LLM_PARSE_TIMEOUT_SECONDS", "90"))
 LLM_PARSE_MAX_RETRIES = int(os.getenv("LLM_PARSE_MAX_RETRIES", "4"))
 
+# LLM parse validation/repair settings
+LLM_PARSE_VALIDATION_ENABLED = os.getenv("LLM_PARSE_VALIDATION_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LLM_PARSE_VALIDATION_MODEL = os.getenv("OPENAI_PARSE_VALIDATION_MODEL", "gpt-5-mini").strip()
+
 ATS_RESUME_SCHEMA_DESCRIPTION_V2 = """You are an expert resume parser.
 
 Extract only information explicitly present in the resume text.
-Do not infer, guess, or invent missing information.
+Do not infer, guess, invent, rewrite, summarize beyond the text, or move information into a different field.
 If a field is not present, return null or [].
 Return only valid JSON matching the exact schema.
+Do not add extra fields.
 
-Important rules:
-- Extract contact info only if explicitly present.
-- Extract skills from sections such as Skills, Key Skills, Technical Skills, Toolkit, Expertise.
-- Extract projects from sections such as Projects, Personal Projects, Side Projects, Selected Projects.
-- Keep URLs only if explicitly present in the resume text.
-- Keep certifications only if explicitly present in the resume text.
-- Do not add synthetic metadata, confidence scores, distances, or derived analytics.
-- current_last_job must be the most recent job title only.
+Global extraction rules:
+- Every returned value must be supported by exact text from the resume.
+- Do not use world knowledge, assumptions, or common resume patterns to fill missing data.
+- Do not derive contact info, locations, dates, education, certifications, or skills.
+- Do not treat section headers, labels, client names, employer names, locations, or sentence fragments as skills.
+- Do not duplicate the same information across unrelated fields.
+
+Contact rules:
+- Extract full_name, email, phone, candidate_location, LinkedIn, GitHub, and portfolio only if explicitly present.
+- If the top line contains labels such as Name, Email, Phone, Current Location, or Visa Status, split each labeled value correctly. Example: "Name: Abiral Pandey Email: x@y.com" means full_name = "Abiral Pandey" only.
+- Do not include labels like "Current Location:" in candidate_location. Example: "Current Location: Woonsocket, Rhode Island" means candidate_location = "Woonsocket, Rhode Island".
+- Do not use employer locations as candidate_location unless the resume clearly states it as the candidate's location.
+- Extract willing_to_relocate only when the resume explicitly says the candidate is willing/open to relocate.
+
+Skills rules:
+- Extract skills only from explicit skills/tool sections such as Skills, Key Skills, Technical Skills, Toolkit, Expertise, Technologies, Tools, Tech Stack, or Environment/Tools.
+- Skills must be concrete technologies, tools, programming languages, frameworks, databases, cloud platforms, methodologies, or domain skills explicitly listed.
+- Do not extract soft skills, responsibilities, verbs, adjectives, business phrases, company names, client names, project names, locations, industries, or section labels as skills.
+- Do not convert experience bullet text into skills unless the bullet explicitly names a technology/tool.
+- Do not split normal phrases into fake skills.
+
+Experience rules:
+- Extract only professional work experience into experience_entries.
+- Do not put education, projects, certifications, volunteering, awards, summaries, section headers, or responsibility bullet lines into experience_entries.
+- company must be the employer/client/company explicitly shown for that role.
+- title must be the explicit job title/role/designation for that role.
+- description should contain only the role's explicit responsibilities or bullet text.
+- current_last_job must be the most recent explicit job title only, not company, location, summary, or skill.
+- is_current should be true only when the role has Present, Current, Till Date, Ongoing, or equivalent explicit text.
+- If a resume line follows this format: Company, City, State Job Title followed by a date range on the next line, split it as company = Company, location = City, State, title = Job Title.
+- Never use "Professional Experience", "Responsibilities", "Environment", or a responsibility sentence as the company name.
+- Never use a responsibility sentence as an employer/company.
+
+Education rules:
 - highest_degree must align with the highest explicit degree found in education.
-- Extract only professional experience into experience_entries.
-- Keep achievements empty unless they are explicitly separated and clearly identifiable.
-- Extract willing_to_relocate only when it is explicitly stated in the resume text.
+- Do not infer highest_degree from skills, job title, summary, or experience.
+- Do not invent institution, field_of_study, GPA, start_date, or end_date.
+- For education lines like "Bachelor of Computer Science – University of North Texas, Denton, Texas", degree = "Bachelor of Computer Science", institution = "University of North Texas", and location = "Denton, Texas".
+- Do not use the education location as the institution.
 
-Field-level constraints:
-- company must be employer/client organization name only.
-- title must be role/designation only.
-- location must be place only (city/state/country) and never a company name.
-- Do not place section headers into fields (e.g., "PROFESSIONAL EXPERIENCE", "SUMMARY", "TECHNICAL SKILLS", "ENVIRONMENT").
-- Do not place comma-separated technology/tool stacks into company or title.
-- If a value is ambiguous/noisy, return null instead of guessing.
+Projects rules:
+- Extract projects only from explicit project sections such as Projects, Personal Projects, Side Projects, Selected Projects, or Academic Projects.
+- Do not create projects from work experience bullets unless the resume has a separate explicit project name/section.
+- Keep project URLs only if explicitly present.
 
-Line pattern guidance:
-- "Client: <org>, <location>" => company=<org>, location=<location>.
-- "Role: <title>" or "Role/Designation: <title>" => title=<title>.
-- "Environment: <tools...>" => extract tools into skills, never company/title/current_last_job.
-- "May 2014 - Present" style tokens are dates only, never company names.
+Certification rules:
+- Keep certifications only if explicitly present in a Certifications, Licenses, Credentials, Training, or Education/Certifications section.
+- Do not convert skills, tools, courses, summaries, or responsibilities into certifications.
+- Do not invent issuer, date, or credential_id.
 
-Experience integrity rules:
-- Each experience_entries item must represent one job/engagement.
-- Do not include education rows inside experience_entries.
-- Do not use month words/date fragments as company names.
-- current_last_job must be a role title from the most recent/current experience entry, not company/location text.
-
-Skills preservation rules:
-- Preserve explicit tool tokens as written when they appear in skills/environment sections.
-- Keep version variants separately when both are present (e.g., "HP ALM 11" and "HP ALM 11.0").
-- Do not collapse distinct versioned tools into one token.
+Achievements and optional sections:
+- Keep achievements empty unless they are explicitly separated and clearly identifiable as achievements/accomplishments/awards.
+- Extract awards, volunteering, publications, and languages only if explicitly present in their own section or clearly labeled text.
 """
 
 ATS_RESUME_OUTPUT_SCHEMA_V2 = """{
@@ -178,6 +203,8 @@ SKILL_ALIAS_MAP = {
     "nodejs": "nodejs",
     "react js": "react",
     "reactjs": "react",
+    "reactjs": "react",
+    "react js": "react",
     "angular js": "angularjs",
     "angular.js": "angularjs",
     "mongo db": "mongodb",
@@ -186,9 +213,17 @@ SKILL_ALIAS_MAP = {
     "aws amazon web services": "aws",
     "amazon web services": "aws",
     "rest web services": "rest",
+    "rest webservice": "rest",
+    "rest webservices": "rest",
     "soap web services": "soap",
+    "soap webservice": "soap",
+    "soap webservices": "soap",
     "hibernate orm": "hibernate",
     "spring orm": "spring",
+    "spring ioc": "spring",
+    "spring dao": "spring",
+    "spring orm": "spring",
+    "spring mvc": "spring mvc",
     "junit": "junit",
     "j unit": "junit",
     "spring framework": "spring",
@@ -196,6 +231,7 @@ SKILL_ALIAS_MAP = {
     "restful web services": "rest",
     "soap restful web services": "soap",
     "amazon web service": "aws",
+    "aws cloud": "aws",
     "git hub": "github",
     "git-hub": "github",
     "power shell": "powershell",
@@ -209,6 +245,8 @@ SKILL_ALIAS_MAP = {
     "web sphere": "websphere",
     "web logic": "weblogic",
     "micro services": "microservices",
+    "core java": "java",
+    "java/j2ee": "java",
 }
 
 PRESENT_WORDS = {
@@ -336,7 +374,8 @@ def parse_resume_with_ft_v2(text: str) -> dict[str, Any] | None:
     if not parsed:
         return None
 
-    return _normalize_llm_parse_output_v2(parsed, normalized_text)
+    normalized = _normalize_llm_parse_output_v2(parsed, normalized_text)
+    return _validate_and_repair_resume_parse_if_needed(normalized_text, normalized)
 
 
 def _extract_json_from_openai_response(response: dict[str, Any]) -> dict[str, Any] | None:
@@ -358,6 +397,152 @@ def _extract_json_from_openai_response(response: dict[str, Any]) -> dict[str, An
         return None
 
     return parsed if isinstance(parsed, dict) else None
+
+
+# --- Resume parse LLM validation/repair ---
+
+def _validate_and_repair_resume_parse_if_needed(raw_text: str, parsed: dict[str, Any]) -> dict[str, Any]:
+    if not LLM_PARSE_VALIDATION_ENABLED:
+        return parsed
+    if not isinstance(parsed, dict):
+        return parsed
+    if not _resume_parse_needs_llm_validation(parsed, raw_text):
+        return parsed
+
+    repaired = _validate_and_repair_resume_parse_with_llm(raw_text, parsed)
+    if not isinstance(repaired, dict):
+        return parsed
+
+    repaired = _normalize_llm_parse_output_v2(repaired, raw_text)
+    if _parse_repair_is_better(parsed, repaired, raw_text):
+        repaired["parse_source"] = "validated_repaired"
+        return repaired
+
+    return parsed
+
+
+def _resume_parse_needs_llm_validation(parsed: dict[str, Any], raw_text: str) -> bool:
+    if parsed.get("parse_source") == "recovered":
+        return True
+
+    entries = parsed.get("experience_entries")
+    if not isinstance(entries, list):
+        return True
+
+    if _experience_entries_need_fallback(entries, raw_text):
+        return True
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return True
+        company = _clean_string(entry.get("company")) or ""
+        title = _clean_string(entry.get("title")) or ""
+        location = _clean_string(entry.get("location")) or ""
+        if not company or not title:
+            return True
+        if len(company.split()) > 12:
+            return True
+        if re.search(r"(?i)\b(professional experience|responsibilities|environment|technical skills)\b", company):
+            return True
+        if company.endswith("."):
+            return True
+        if re.search(r"(?i)\b(developed|implemented|created|configured|responsible|worked|used)\b", company):
+            if len(company.split()) > 6:
+                return True
+        if re.match(r"(?i)^\s*current\s+location\s*:", location):
+            return True
+
+    candidate_location = _clean_string(parsed.get("candidate_location"))
+    if candidate_location and re.match(r"(?i)^\s*current\s+location\s*:", candidate_location):
+        return True
+
+    education = parsed.get("education")
+    if isinstance(education, list):
+        for item in education:
+            if not isinstance(item, dict):
+                continue
+            institution = _clean_string(item.get("institution")) or ""
+            location = _clean_string(item.get("location")) or ""
+            if institution and _looks_like_location_text(institution):
+                return True
+            if institution and location and institution.lower() == location.lower():
+                return True
+
+    return False
+
+
+def _validate_and_repair_resume_parse_with_llm(raw_text: str, parsed: dict[str, Any]) -> dict[str, Any] | None:
+    if not OPENAI_API_KEY:
+        return None
+
+    validator_prompt = """You are a strict resume parse validator and repair assistant.
+
+Compare the raw resume text against the parsed JSON.
+Only correct fields that are clearly wrong based on explicit resume text.
+Do not infer, guess, invent, or add unsupported information.
+Do not rewrite valid descriptions for style.
+Do not remove valid data.
+Return only the corrected resume JSON using the same schema as the parsed JSON.
+Do not add explanations, comments, confidence scores, issue lists, or extra fields.
+
+Critical checks:
+- full_name must not include Email, Phone, Current Location, or Visa Status labels.
+- candidate_location must not include labels like "Current Location:".
+- Do not use employer/job locations as candidate_location unless explicitly shown as candidate location/header location.
+- experience_entries.company must be an employer/client/company, not "Professional Experience", "Responsibilities", "Environment", or a responsibility sentence.
+- If a job line is formatted as "Company, City, State Job Title" and the date range is on the next line, split it into company, location, title, and dates correctly.
+- Do not use responsibility bullets as company names.
+- Education institution and location must not be swapped. For "Bachelor of Computer Science – University of North Texas, Denton, Texas", institution is "University of North Texas" and location is "Denton, Texas".
+- Remove malformed skill fragments such as incomplete parenthesis tokens or truncated version tokens only when clearly malformed.
+"""
+
+    payload = {
+        "model": LLM_PARSE_VALIDATION_MODEL,
+        "messages": [
+            {"role": "system", "content": validator_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "Raw resume text:\n\n"
+                    f"{raw_text[:24000]}\n\n"
+                    "Parsed JSON to validate and repair:\n\n"
+                    f"{json.dumps(parsed, ensure_ascii=False)}"
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
+    }
+
+    response = _post_chat_completions(payload)
+    if not response:
+        return None
+    return _extract_json_from_openai_response(response)
+
+
+def _parse_repair_is_better(original: dict[str, Any], repaired: dict[str, Any], raw_text: str) -> bool:
+    original_entries = original.get("experience_entries") if isinstance(original, dict) else []
+    repaired_entries = repaired.get("experience_entries") if isinstance(repaired, dict) else []
+
+    original_score = _experience_entries_quality_score(original_entries)
+    repaired_score = _experience_entries_quality_score(repaired_entries)
+    if repaired_score < original_score:
+        return False
+
+    if isinstance(repaired_entries, list):
+        for entry in repaired_entries:
+            if not isinstance(entry, dict):
+                return False
+            company = _clean_string(entry.get("company")) or ""
+            if company and (
+                len(company.split()) > 12
+                or re.search(r"(?i)\b(professional experience|responsibilities|environment|technical skills)\b", company)
+                or company.endswith(".")
+            ):
+                return False
+
+    if not isinstance(repaired, dict):
+        return False
+    return True
 
 
 def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dict[str, Any]:
@@ -456,6 +641,9 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["experience_entries"] = sort_experience_entries(result["experience_entries"])
 
     fallback_entries = _extract_experience_entries_from_text(raw_text)
+    header_date_entries = _extract_company_location_title_date_next_line_entries(raw_text)
+    if header_date_entries:
+        fallback_entries = _merge_experience_entries(fallback_entries, header_date_entries)
     if fallback_entries and (
         _experience_entries_need_fallback(result["experience_entries"], raw_text)
         or _experience_entries_quality_score(
@@ -539,11 +727,8 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     result["phone"] = _normalize_phone_value(result.get("phone"), raw_text)
     if result["email"] is None:
         result["email"] = _extract_email_from_text(raw_text)
-    top_name = _extract_full_name_from_top(raw_text)
     if result.get("full_name") is None or _looks_like_role_title(result.get("full_name")):
-        result["full_name"] = top_name
-    elif _should_prefer_top_name(result.get("full_name"), top_name):
-        result["full_name"] = top_name
+        result["full_name"] = _extract_full_name_from_top(raw_text)
     result["skills"] = _postprocess_skills(
         result.get("skills", []),
         result.get("certifications", []),
@@ -582,14 +767,21 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     if _looks_like_bad_candidate_location(result.get("candidate_location")):
         result["candidate_location"] = None
 
-    if result["candidate_location"] is None:
-        for entry in result["experience_entries"]:
-            location = entry.get("location")
-            if isinstance(location, str) and location.strip():
-                candidate = location.strip()
-                if not _looks_like_bad_candidate_location(candidate):
-                    result["candidate_location"] = candidate
-                    break
+    # Do not infer candidate_location from work history locations.
+    # Candidate location should only come from explicit resume header/contact info.
+    if not result.get("candidate_location"):
+        fallback_location = _derive_candidate_location_from_recent_experience(
+            result.get("experience_entries", [])
+        )
+        if fallback_location:
+            result["candidate_location"] = fallback_location
+
+    if isinstance(result.get("candidate_location"), str):
+        result["candidate_location"] = re.sub(
+            r"(?i)^\s*current\s+location\s*:\s*",
+            "",
+            result["candidate_location"],
+        ).strip() or None
 
     if result["highest_degree"] is None:
         result["highest_degree"] = derive_highest_degree(result["education"])
@@ -690,6 +882,17 @@ def canonicalize_skill_tokens_with_unknowns(skills: Any) -> tuple[list[str], lis
         cleaned = _clean_string(skill)
         if not cleaned:
             continue
+        # malformed OCR/parser fragments
+        if cleaned.count("(") != cleaned.count(")"):
+            continue
+
+        if re.fullmatch(r"(?i)java\s+\d", cleaned):
+            continue
+
+        if len(cleaned.strip()) <= 2:
+            continue
+
+        cleaned = cleaned.strip(".,:- ")
         key = _normalize_skill_lookup_key(cleaned)
         if not key:
             continue
@@ -786,6 +989,11 @@ def _normalize_experience_entry_v2(entry: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_company_string(value: Any) -> str | None:
     company = _clean_string(value)
+    if company and re.fullmatch(
+        r"(?i)\s*(professional experience|professional experiences|experience|technical skills|skills|summary)\s*:?\s*",
+        company,
+    ):
+        return None
     if not company:
         return None
     had_client_prefix = bool(re.match(r"(?i)^\s*client\s*:", company))
@@ -824,6 +1032,10 @@ def _normalize_company_string(value: Any) -> str | None:
         if had_client_prefix:
             # "Client: McDonald's, Oak Brook, IL (HCL America)" -> "McDonald's"
             fragment = re.sub(r"\s*\([^)]*\)\s*$", "", fragment).strip(" |,-")
+        # Preserve company names that legitimately contain action words.
+        if re.fullmatch(r"[A-Za-z0-9 .&'()/,-]{2,120}", fragment):
+            cleaned_parts.append(fragment)
+            continue
         if not fragment or _looks_like_location_text(fragment):
             continue
         cleaned_parts.append(fragment)
@@ -930,7 +1142,23 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         item["achievements"] = _unique_clean_strings(item.get("achievements", [])) if isinstance(item.get("achievements"), list) else []
         if isinstance(item.get("title"), str) and re.fullmatch(r"(?i)\s*responsibilities\s*:?\s*", item["title"]):
             continue
-        if _looks_like_experience_header_noise_entry(item):
+        company_text = (_clean_string(item.get("company")) or "").lower().strip()
+
+        if company_text in {
+            "professional experience",
+            "professional experiences",
+            "experience",
+            "work experience",
+            "technical skills",
+            "skills",
+            "summary",
+        }:
+            continue
+
+        if company_text.endswith(":"):
+            continue
+
+        if re.fullmatch(r"(?i)[a-z ]+:", company_text):
             continue
         if _looks_like_education_artifact_experience_entry(item):
             continue
@@ -959,24 +1187,6 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
         repaired.append(item)
 
     return repaired
-
-
-def _looks_like_experience_header_noise_entry(entry: dict[str, Any]) -> bool:
-    company = _clean_string(entry.get("company")) or ""
-    title = _clean_string(entry.get("title")) or ""
-    location = _clean_string(entry.get("location")) or ""
-    description = _clean_string(entry.get("description")) or ""
-    start_date = _clean_date_string(entry.get("start_date"))
-    end_date = _clean_date_string(entry.get("end_date"))
-
-    if not company:
-        return False
-    if not re.fullmatch(
-        r"(?i)\s*(professional experience|professional experiences|work experience|experience)\s*:?\s*",
-        company,
-    ):
-        return False
-    return not any([title, location, description, start_date, end_date, bool(entry.get("is_current"))])
 
 
 def _experience_entries_quality_score(entries: Any) -> int:
@@ -1305,13 +1515,29 @@ def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
         institution_match = institution_pattern.search(line)
         institution_value = _clean_string(institution_match.group(1)) if institution_match else None
         if not institution_match:
-            parts = [part.strip(" .") for part in line.split(",") if part.strip(" .")]
-            if len(parts) >= 2 and degree_match:
-                institution_candidate = parts[1]
-                if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .&'-]{1,80}", institution_candidate):
-                    institution_value = _clean_string(institution_candidate)
+            dash_parts = [part.strip(" .") for part in re.split(r"\s+[–—-]\s+", line, maxsplit=1) if part.strip(" .")]
+            if len(dash_parts) == 2 and degree_match:
+                school_and_location = dash_parts[1]
+                comma_parts = [part.strip(" .") for part in school_and_location.split(",") if part.strip(" .")]
+                if comma_parts:
+                    institution_candidate = comma_parts[0]
+                    if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .&'-]{1,100}", institution_candidate):
+                        institution_value = _clean_string(institution_candidate)
+            if not institution_value:
+                parts = [part.strip(" .") for part in line.split(",") if part.strip(" .")]
+                if len(parts) >= 2 and degree_match:
+                    institution_candidate = parts[1]
+                    if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .&'-]{1,80}", institution_candidate):
+                        institution_value = _clean_string(institution_candidate)
         year_match = re.search(r"\b(19|20)\d{2}\b", line)
         end_date = f"{year_match.group(0)}-06" if year_match else None
+
+        education_location = None
+        dash_parts = [part.strip(" .") for part in re.split(r"\s+[–—-]\s+", line, maxsplit=1) if part.strip(" .")]
+        if len(dash_parts) == 2:
+            comma_parts = [part.strip(" .") for part in dash_parts[1].split(",") if part.strip(" .")]
+            if len(comma_parts) >= 3:
+                education_location = f"{comma_parts[-2]}, {comma_parts[-1]}"
 
         entries.append(
             {
@@ -1321,7 +1547,7 @@ def _extract_education_from_text(text: str) -> list[dict[str, Any]]:
                 "start_date": None,
                 "end_date": end_date,
                 "gpa": None,
-                "location": None,
+                "location": education_location,
             }
         )
 
@@ -1569,6 +1795,7 @@ def _extract_full_name_from_top(text: str) -> str | None:
         if not m:
             continue
         candidate = _clean_string(m.group(1))
+        candidate = re.split(r"(?i)\b(?:email|phone|current\s+location|visa\s+status)\s*:", candidate)[0].strip(" ,-|")
         if not candidate:
             continue
         if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst)\b", candidate):
@@ -1582,7 +1809,7 @@ def _extract_full_name_from_top(text: str) -> str | None:
             # Recover names from OCR lines like:
             # "Mounika10200@gmail.com Mounika Reddy"
             candidate = re.sub(EMAIL_PATTERN, " ", line)
-            candidate = re.sub(r"\+?\(?\d[\d()\-\s]{7,}\d", " ", candidate)
+            candidate = re.sub(r"\+?\d[\d()\-\s]{7,}\d", " ", candidate)
             candidate = re.sub(
                 r"(?i)\b(sr\.?\s*business analyst|business system analyst|business analyst|data analyst|quality analyst|project manager)\b",
                 " ",
@@ -1593,51 +1820,34 @@ def _extract_full_name_from_top(text: str) -> str | None:
             if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", candidate or "") and 2 <= len(candidate.split()) <= 5:
                 return _clean_string(candidate)
             continue
-        # Recover names from OCR lines like:
-        # "AMULYA KOMATINENI (515)309-1612"
-        line_without_phone = re.sub(r"\+?\(?\d[\d()\-\s]{7,}\d", " ", line)
-        line_without_phone = re.sub(r"\s+", " ", line_without_phone).strip(" |,-")
-        if re.search(r"\b(phone|email|summary|skills|experience|education|certification)\b", line_without_phone, re.IGNORECASE):
+        if "@" in line:
             continue
-        if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b", line_without_phone):
+        if re.search(r"\b(phone|email|summary|skills|experience|education|certification)\b", line, re.IGNORECASE):
             continue
-        line_without_phone = re.sub(r"(?i)\bEmployer Details\b", "", line_without_phone).strip(" ,-")
-        if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line_without_phone) and 1 <= len(line_without_phone.split()) <= 5:
-            return _clean_string(line_without_phone)
+        if re.search(r"(?i)\b(business system analyst|business analyst|data analyst|quality analyst|project manager)\b", line):
+            continue
+        line = re.sub(r"(?i)\bEmployer Details\b", "", line).strip(" ,-")
+        if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", line) and 1 <= len(line.split()) <= 5:
+            return _clean_string(line)
     return None
-
-
-def _should_prefer_top_name(existing_name: Any, top_name: Any) -> bool:
-    existing = _clean_string(existing_name)
-    candidate = _clean_string(top_name)
-    if not candidate:
-        return False
-    if _looks_like_role_title(candidate):
-        return False
-    if not existing:
-        return True
-    if _looks_like_role_title(existing):
-        return True
-    if existing.lower() == candidate.lower():
-        return False
-
-    ex_parts = existing.lower().split()
-    cand_parts = candidate.lower().split()
-    if not ex_parts or not cand_parts:
-        return False
-    if ex_parts[0] == cand_parts[0]:
-        ex_last = ex_parts[-1]
-        cand_last = cand_parts[-1]
-        if SequenceMatcher(None, ex_last, cand_last).ratio() >= 0.88:
-            return True
-    if SequenceMatcher(None, existing.lower(), candidate.lower()).ratio() >= 0.92:
-        return True
-    return False
 
 
 def _repair_company_location_split(company: str, location: str) -> tuple[str, str]:
     clean_company = _clean_string(company) or company
     clean_location = _clean_string(location) or location
+
+    # Repair cases where city is attached to company using hyphen format.
+    # Example: "US Cellular - Chicago" + "IL"
+    hyphen_city_match = re.match(
+        r"^(.+?)\s+-\s+([A-Za-z][A-Za-z .'-]{1,50})$",
+        clean_company,
+    )
+    if hyphen_city_match and re.fullmatch(r"[A-Z]{2}", clean_location):
+        repaired_company = _clean_string(hyphen_city_match.group(1))
+        repaired_city = _clean_string(hyphen_city_match.group(2))
+
+        if repaired_company and repaired_city:
+            return repaired_company, f"{repaired_city}, {clean_location}"
 
     # Pattern seen in OCR/LLM output:
     # company="Office of", location="Attorney General Child Support Division, TX"
@@ -1659,16 +1869,6 @@ def _repair_company_location_split(company: str, location: str) -> tuple[str, st
             org_part, city_part = parts[0], parts[1]
             if _looks_like_org_line(org_part) and re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,40}", city_part):
                 return _clean_string(org_part) or org_part, f"{city_part}, {clean_company}"
-
-    # Recover company suffix leakage into location:
-    # company="YANA Software Pvt.", location="LTD - Hyderabad, INDIA."
-    leak_match = re.match(r"(?i)^\s*(ltd|llc|inc|corp|corporation)\b\s*[-,]\s*(.+)$", clean_location)
-    if leak_match:
-        suffix = leak_match.group(1).upper()
-        rest_location = _clean_string(leak_match.group(2).strip(" .,")) or clean_location
-        if re.search(r"(?i)\bpvt\.?$", clean_company) and not re.search(r"(?i)\bltd\b", clean_company):
-            clean_company = _clean_string(f"{clean_company} {suffix}") or clean_company
-        clean_location = rest_location
 
     return clean_company, clean_location
 
@@ -1744,6 +1944,40 @@ def _infer_company_from_raw_timeline_line(raw_text: str, *, start_date: Any, tit
         same_line_company = _normalize_company_string(_strip_date_range_from_text(line))
         if same_line_company and not _looks_like_month_or_date_fragment(same_line_company):
             return same_line_company
+
+    return None
+
+
+def _derive_candidate_location_from_recent_experience(entries: Any) -> str | None:
+    if not isinstance(entries, list):
+        return None
+
+    sorted_entries = sort_experience_entries(entries)
+
+    for entry in sorted_entries:
+        if not isinstance(entry, dict):
+            continue
+
+        location = _clean_string(entry.get("location"))
+        if not location:
+            continue
+
+        if _looks_like_bad_candidate_location(location):
+            continue
+
+        lowered = location.lower()
+
+        if lowered in {
+            "india",
+            "usa",
+            "united states",
+        }:
+            continue
+
+        if len(location) > 80:
+            continue
+
+        return location
 
     return None
 
@@ -2833,7 +3067,52 @@ def _postprocess_skills(skills: Any, certifications: Any, raw_text: str = "") ->
             continue
         filtered.append(cleaned_token)
 
-    return _unique_clean_strings(filtered)
+    normalized = _unique_clean_strings(filtered)
+
+    filtered_skills = []
+
+    for skill in normalized:
+        lowered = skill.lower().strip()
+
+        if lowered in {
+            "java 1",
+            "adobe (cq5",
+            "tools",
+            "technologies",
+            "environment",
+        }:
+            continue
+
+        if lowered.endswith("("):
+            continue
+
+        if lowered.count("(") != lowered.count(")"):
+            continue
+
+        filtered_skills.append(skill)
+
+    normalized = filtered_skills
+
+    dedupe_map = {
+        "core java": "java",
+        "java/j2ee": "java",
+        "aws cloud": "aws",
+        "soap webservice": "soap",
+        "soap webservices": "soap",
+    }
+
+    collapsed = []
+
+    for skill in normalized:
+        lowered = skill.lower().strip()
+        collapsed_skill = dedupe_map.get(lowered, skill)
+
+        if collapsed_skill not in collapsed:
+            collapsed.append(collapsed_skill)
+
+    normalized = collapsed
+
+    return _unique_clean_strings(normalized)
 
 
 def _extract_dynamic_short_skill_allowlist(raw_text: str) -> set[str]:
@@ -3458,6 +3737,8 @@ def _looks_like_education_artifact_experience_entry(entry: dict[str, Any]) -> bo
     return False
 
 
+
+
 def _extract_title_from_description_prefix(value: Any) -> str | None:
     desc = _clean_string(value)
     if not desc:
@@ -3803,3 +4084,88 @@ def derive_primary_domain(
             return label
 
     return None
+
+def _extract_company_location_title_date_next_line_entries(text: str) -> list[dict[str, Any]]:
+    """Recover experience rows formatted as:
+    Company, City, State Job Title
+    Month YYYY - Month YYYY
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    entries: list[dict[str, Any]] = []
+
+    title_pattern = re.compile(
+        r"(?i)\b(Full\s+Stack\s+Java\s+Developer|Software\s+Engineer|Java\s+Developer|J2EE\s+Developer|Junior\s+Java\s+Developer|Sr\.?\s+Java\s+Developer|Senior\s+Java\s+Developer|JAVA/J2EE\s+Developer)\b"
+    )
+
+    stop_header_pattern = re.compile(
+        r"(?i)^\s*(responsibilities|environment|technical\s+skills|education|summary|professional\s+experience)\s*:"
+    )
+
+    for idx, line in enumerate(lines[:-1]):
+        next_line = lines[idx + 1]
+        start_date, end_date, is_current = _extract_date_range_from_text(next_line)
+        if not (start_date or end_date or is_current):
+            continue
+        if stop_header_pattern.match(line):
+            continue
+
+        title_match = title_pattern.search(line)
+        if not title_match:
+            continue
+
+        before_title = line[: title_match.start()].strip(" ,-–—")
+        title = _clean_experience_title(title_match.group(1))
+        if not before_title or not title:
+            continue
+
+        parts = [part.strip() for part in before_title.split(",") if part.strip()]
+        company = None
+        location = None
+
+        if len(parts) >= 3:
+            company = ", ".join(parts[:-2]).strip()
+            location = f"{parts[-2]}, {parts[-1]}"
+        elif len(parts) == 2:
+            company = parts[0]
+            location = parts[1]
+        else:
+            company = before_title
+
+        company = _normalize_company_string(company)
+        location = _clean_string(location)
+        if not company:
+            continue
+        if location and not _looks_like_location_text(location):
+            location = None
+
+        description_lines: list[str] = []
+        for detail in lines[idx + 2 :]:
+            if title_pattern.search(detail):
+                break
+            if _extract_date_range_from_text(detail) != (None, None, False):
+                break
+            if re.match(r"(?i)^\s*(environment|education|technical\s+skills|professional\s+experience)\s*:", detail):
+                break
+            if re.match(r"(?i)^\s*responsibilities\s*:", detail):
+                continue
+            description_lines.append(detail)
+
+        entries.append(
+            {
+                "company": company,
+                "title": title,
+                "location": location,
+                "start_date": start_date,
+                "end_date": end_date,
+                "is_current": is_current,
+                "employment_type": None,
+                "description": _trim_experience_description(" ".join(description_lines)),
+                "skills_used": [],
+                "achievements": [],
+            }
+        )
+
+    return sort_experience_entries(entries)

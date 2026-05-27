@@ -1836,6 +1836,18 @@ def _repair_company_location_split(company: str, location: str) -> tuple[str, st
     clean_company = _clean_string(company) or company
     clean_location = _clean_string(location) or location
 
+    # Repair split like:
+    # company="YANA Software Pvt." + location="LTD - Hyderabad, INDIA."
+    ltd_split_match = re.match(
+        r"(?i)^\s*ltd\s*-\s*(.+?)\s*\.?\s*$",
+        clean_location,
+    )
+    if ltd_split_match and not re.search(r"(?i)\bltd\b", clean_company):
+        repaired_company = _clean_string(f"{clean_company} LTD")
+        repaired_location = _clean_string(ltd_split_match.group(1).strip(" ,.-"))
+        if repaired_company and repaired_location:
+            return repaired_company, repaired_location
+
     # Repair cases where city is attached to company using hyphen format.
     # Example: "US Cellular - Chicago" + "IL"
     hyphen_city_match = re.match(
@@ -2892,6 +2904,24 @@ def _trim_experience_description(value: Any, max_sentences: int = 20) -> str | N
     cleaned = _clean_string(value)
     if not cleaned:
         return None
+
+    # Remove noisy prefixed labels that often leak from OCR/LLM extraction.
+    cleaned = re.sub(r"(?i)^\s*role\s*:\s*[^:]{0,120}?\s*(?=description\s*:)", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)^\s*description\s*:\s*", "", cleaned).strip()
+
+    # Keep the core project/role description, not full responsibilities/environment dump.
+    stop_match = re.search(r"(?i)\b(responsibilities|environment)\s*:", cleaned)
+    if stop_match:
+        cleaned = cleaned[: stop_match.start()].strip()
+
+    # If still very long, keep only the first paragraph-like chunk.
+    para_split = re.split(r"(?<=[.!?])\s+(?=[A-Z][a-z])", cleaned)
+    if para_split:
+        cleaned = para_split[0].strip()
+
+    # Hard cap to keep concise per-role description.
+    if len(cleaned) > 700:
+        cleaned = cleaned[:700].rsplit(" ", 1)[0].strip() + "..."
 
     # Keep full sentences only, capped to a manageable size per experience block.
     sentences = [

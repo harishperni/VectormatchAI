@@ -730,6 +730,7 @@ def _normalize_llm_parse_output_v2(parsed: dict[str, Any], raw_text: str) -> dic
     if result.get("full_name") is None or _looks_like_role_title(result.get("full_name")):
         result["full_name"] = _extract_full_name_from_top(raw_text)
     else:
+        # Prefer the resume header when the model returns a near-match typo.
         top_full_name = _extract_full_name_from_top(raw_text)
         if _should_prefer_top_full_name(result.get("full_name"), top_full_name):
             result["full_name"] = top_full_name

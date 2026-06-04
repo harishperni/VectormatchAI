@@ -1165,6 +1165,7 @@ def _repair_experience_entries(entries: Any, *, current_last_job: Any, raw_text:
 
         if re.fullmatch(r"(?i)[a-z ]+:", company_text):
             continue
+        # Drop orphan responsibility bullets that the model occasionally emits as companies.
         if (
             _looks_like_sentence_fragment(_clean_string(item.get("company")) or "")
             and not any(
